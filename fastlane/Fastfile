@@ -39,6 +39,10 @@ def report_app_group
   end
 end
 
+def note(msg)
+  puts "::notice::#{msg}"
+end
+
 platform :ios do
   desc "Create the app's identifiers with Apple"
   lane :identifiers do
@@ -48,19 +52,19 @@ platform :ios do
     names.each do |identifier, name|
       bundle = Spaceship::ConnectAPI::BundleId.find(identifier) ||
         Spaceship::ConnectAPI::BundleId.create(name: name, identifier: identifier, platform: "IOS")
-      UI.success("Identifier ready: #{identifier}")
+      note("Identifier ready: #{identifier}")
       next if identifier.end_with?(".widgets")
       begin
         caps = bundle.get_capabilities.map(&:capability_type)
         unless caps.include?("APP_GROUPS")
           bundle.create_capability("APP_GROUPS")
-          UI.success("App Groups switched on for #{identifier}")
+          note("App Groups switched on for #{identifier}")
         end
       rescue => e
-        UI.important("Could not switch on App Groups for #{identifier}: #{e.message}")
+        note("Could not switch on App Groups for #{identifier}: #{e.message}")
       end
     end
-    UI.important("App Group #{APP_GROUP} must exist and be ticked on the app and keyboard identifiers at developer.apple.com (Apple's API can't do this part)")
+    note("App Group #{APP_GROUP} must exist and be ticked on the app and keyboard identifiers at developer.apple.com (Apple's API can't do this part)")
   end
 
   desc "Create or refresh signing certificates and profiles"
