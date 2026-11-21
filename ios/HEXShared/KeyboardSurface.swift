@@ -23,310 +23,6 @@ final class KeyboardClockModel: ObservableObject {
     }
 }
 
-@MainActor
-final class KeyboardViewModel: ObservableObject {
-    enum PickerTray: Equatable {
-        case none
-        case style
-        case language
-    }
-
-    enum StagePhase: Equatable {
-        case idle
-        case recording
-        case transcribing
-        case failed
-    }
-
-    struct PendingCommand: Equatable {
-        let kind: KeyboardCommandKind
-        let jobID: String
-        let sentAt: TimeInterval
-    }
-
-    static let commandAckTimeout: TimeInterval = 1.6
-
-    let clock = KeyboardClockModel()
-
-    @Published var hasFullAccess = true
-    @Published var needsGlobeKey = true
-    @Published var returnKeyLabel = "Return"
-    @Published var isModelInstalled = false
-    @Published private(set) var isWarmAvailable = false
-    @Published private(set) var stagePhase: StagePhase = .idle
-    @Published private(set) var statusMessage: String?
-    @Published var style: DictationStyle = .polished
-    @Published var activeTray: PickerTray = .none
-    /// Settings › Dictation language (nil for Automatic), what Automatic resolves to, and the
-    /// languages the keyboard's quick switch offers. Empty choices hide the switch.
-    @Published var dictationLanguage: String?
-    @Published var automaticLanguage: String?
-    @Published var languageChoices: [String] = []
-    /// Translate what I say's target (BCP 47) while it is on, else nil, and the switch that
-    /// picks translated or as spoken for the next dictations.
-    @Published var translationTarget: String?
-    @Published var pastesTranslation = true
-    /// Translate what I say's target whether it is on or off, for the keyboards' Translate to
-    /// <language> switch; nil hides the switch (no Apple translation before iOS 26).
-    @Published var translationLanguage: String?
-    /// The targets the full keyboard's Hex key menu offers (`DictationTranslationSettings.targetChoices`).
-    @Published var translationTargetChoices: [String] = []
-    /// Record typing logs is recording this field: both keyboards show a small mark the
-    /// whole time, so logging is never hidden.
-    @Published var isLoggingTyping = false
-
-    // Non-published live telemetry read directly by `DotScopeHostView` / button tap handlers
-    // so 25–30 Hz polling never invalidates SwiftUI views mid-spring.
-    var liveLoudnessDB: Float = -62.0
-    var currentTimestamp: TimeInterval = Date().timeIntervalSince1970
-    private(set) var currentSnapshot: KeyboardSnapshot = .offline
-    var coldStartURL: URL = KeyboardLaunchRequest.startSession(requestedAt: nil).url
-    private(set) var pendingCommand: PendingCommand?
-
-    var onDictateTap: (() -> Void)?
-    var onLocalDictateTap: (() -> Void)?
-    /// The finger landed on the full keyboard's Hex key (wall clock), before it is a tap,
-    /// a hold or a slide.
-    var onHexKeyPress: ((TimeInterval) -> Void)?
-    /// That press became a slide (the style menu) or was cancelled before it was a tap or a hold.
-    var onHexKeyAbandon: (() -> Void)?
-    var onStopTap: (() -> Void)?
-    var onCancelTap: (() -> Void)?
-    var onStyleSelected: ((DictationStyle) -> Void)?
-    /// A language picked in the keyboard's switch; nil is Automatic.
-    var onLanguageSelected: ((String?) -> Void)?
-    /// Translate to <language> switched on (true) or off where you dictate.
-    var onTranslationToggled: ((Bool) -> Void)?
-    /// A target picked in the Hex key menu; it also turns translation on.
-    var onTranslationTargetSelected: ((String) -> Void)?
-    var onSpace: (() -> Void)?
-    var onDelete: (() -> Void)?
-    var onReturn: (() -> Void)?
-    var onOpenURL: ((URL) -> Void)?
-    /// The dictation bar's light haptic for each press; the keyboard allows it with Full
-    /// Access and Experiments › Haptics, as the full keyboard's keys.
-    var onKeyFeedback: (() -> Void)?
-    weak var inputViewController: UIInputViewController?
-
-    /// The language dictation uses now, when known.
-    var effectiveLanguage: String? {
-        dictationLanguage ?? automaticLanguage
-    }
-
-    /// Its own short name ("Norsk", "English"), for the switch and the space bar.
-    var languageLabel: String? {
-        effectiveLanguage.map(DictationLanguageSwitch.nativeName(for:))
-    }
-
-    var showsLanguageSwitch: Bool {
-        hasFullAccess && !languageChoices.isEmpty
-    }
-
-    /// "Paste in English" or "Paste in Spanish", when Translate what I say is on and you
-    /// dictate in another language than its target.
-    var pasteChoice: TranslationPasteChoice? {
-        guard hasFullAccess, let translationTarget else { return nil }
-        return TranslationPasteChoice(target: translationTarget, source: effectiveLanguage)
-    }
-
-    /// The keyboards' Translate to <language> switch can show: Full Access and a target.
-    var showsTranslationSwitch: Bool {
-        hasFullAccess && translationLanguage != nil
-    }
-
-    /// Dictations paste translated: Translate what I say is on and its paste switch says
-    /// translated. The Hex key wears the target's badge ("EN") the whole time.
-    var isTranslating: Bool {
-        hasFullAccess && translationTarget != nil && pastesTranslation
-    }
-
-    /// The target while `isTranslating`, for the badge beside the Hex key ("EN").
-    var translatingTo: String? {
-        isTranslating ? translationTarget : nil
-    }
-
-    /// The language label with where dictations go while they paste translated:
-    /// "Español → English".
-    var languageSummary: String? {
-        guard let languageLabel else { return nil }
-        guard pastesTranslation, let target = pasteChoice?.target else { return languageLabel }
-        return "\(languageLabel) → \(DictationLanguageSwitch.nativeName(for: target))"
-    }
-
-    var dotScopePhase: DotScopePhase {
-        switch stagePhase {
-        case .idle:
-            return .idle
-        case .recording:
-            return .recording
-        case .transcribing:
-            return .processing
-        case .failed:
-            return .failed
-        }
-    }
-
-    func setActiveTray(_ tray: PickerTray, reduceMotion: Bool) {
-        guard activeTray != tray else { return }
-        withAnimation(HexMotion.trayAnimation(reduceMotion: reduceMotion)) {
-            activeTray = tray
-        }
-    }
-
-    func setPendingCommand(_ command: PendingCommand?, now: TimeInterval, animated: Bool) {
-        currentTimestamp = now
-        pendingCommand = command
-        reconcileVisualState(
-            hasFullAccess: hasFullAccess,
-            snapshot: currentSnapshot,
-            isModelInstalled: isModelInstalled,
-            style: style,
-            now: now,
-            animated: animated
-        )
-    }
-
-    func applyBridgeState(
-        hasFullAccess newFullAccess: Bool,
-        snapshot newSnapshot: KeyboardSnapshot,
-        isModelInstalled newModelInstalled: Bool,
-        style newStyle: DictationStyle,
-        now: TimeInterval,
-        clearPending: Bool = false,
-        animated: Bool
-    ) {
-        currentTimestamp = now
-        currentSnapshot = newSnapshot
-        liveLoudnessDB = newSnapshot.state == .recording ? newSnapshot.effectiveLoudnessDB : -62.0
-
-        if clearPending {
-            pendingCommand = nil
-        } else if let pending = pendingCommand {
-            let expired = now - pending.sentAt >= Self.commandAckTimeout
-            let acknowledged = (pending.kind == .start && newSnapshot.state == .recording)
-                || (pending.kind == .stop && newSnapshot.state != .recording)
-                || (pending.kind == .cancel && newSnapshot.state != .recording)
-            if expired || acknowledged {
-                pendingCommand = nil
-            }
-        }
-
-        let recordingElapsed: TimeInterval? = if newSnapshot.state == .recording {
-            newSnapshot.recordingElapsed(at: now)
-        } else if let pending = pendingCommand, pending.kind == .start {
-            max(0, now - pending.sentAt)
-        } else {
-            nil
-        }
-        let warmRemaining: TimeInterval? = newSnapshot.isAvailable(at: now)
-            ? max(0, newSnapshot.expiresAt - now)
-            : nil
-        clock.update(recordingElapsed: recordingElapsed, warmRemaining: warmRemaining)
-
-        reconcileVisualState(
-            hasFullAccess: newFullAccess,
-            snapshot: newSnapshot,
-            isModelInstalled: newModelInstalled,
-            style: newStyle,
-            now: now,
-            animated: animated
-        )
-    }
-
-    /// Convenience for deterministic preview/snapshot fixtures (`KeyboardPreviewHost`).
-    func configureFixture(
-        snapshot: KeyboardSnapshot,
-        now: TimeInterval,
-        hasFullAccess: Bool = true,
-        isModelInstalled: Bool = true,
-        style: DictationStyle = .polished,
-        activeTray: PickerTray = .none
-    ) {
-        self.activeTray = activeTray
-        applyBridgeState(
-            hasFullAccess: hasFullAccess,
-            snapshot: snapshot,
-            isModelInstalled: isModelInstalled,
-            style: style,
-            now: now,
-            clearPending: true,
-            animated: false
-        )
-    }
-
-    private func reconcileVisualState(
-        hasFullAccess newFullAccess: Bool,
-        snapshot snap: KeyboardSnapshot,
-        isModelInstalled newModelInstalled: Bool,
-        style newStyle: DictationStyle,
-        now: TimeInterval,
-        animated: Bool
-    ) {
-        let nextWarm = newFullAccess && snap.isAvailable(at: now)
-        let nextStage = computeStagePhase(snapshot: snap, now: now, hasFullAccess: newFullAccess)
-        let trimmedMsg = snap.message?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let nextMessage = (trimmedMsg?.isEmpty == false) ? trimmedMsg : nil
-
-        let changed = hasFullAccess != newFullAccess
-            || isWarmAvailable != nextWarm
-            || isModelInstalled != newModelInstalled
-            || stagePhase != nextStage
-            || statusMessage != nextMessage
-            || style != newStyle
-
-        guard changed else { return }
-
-        let commit = {
-            self.hasFullAccess = newFullAccess
-            self.isWarmAvailable = nextWarm
-            self.isModelInstalled = newModelInstalled
-            self.stagePhase = nextStage
-            self.statusMessage = nextMessage
-            self.style = newStyle
-        }
-
-        if animated {
-            withAnimation(HexMotion.stageAnimation(reduceMotion: UIAccessibility.isReduceMotionEnabled)) {
-                commit()
-            }
-        } else {
-            commit()
-        }
-    }
-
-    private func computeStagePhase(
-        snapshot snap: KeyboardSnapshot,
-        now: TimeInterval,
-        hasFullAccess: Bool
-    ) -> StagePhase {
-        guard hasFullAccess else { return .idle }
-
-        if let pending = pendingCommand, now - pending.sentAt < Self.commandAckTimeout {
-            switch pending.kind {
-            case .cancel:
-                return .idle
-            case .stop where snap.state == .recording:
-                return .transcribing
-            case .start where snap.state != .recording:
-                return .recording
-            default:
-                break
-            }
-        }
-
-        switch snap.state {
-        case .recording:
-            return .recording
-        case .transcribing:
-            return .transcribing
-        case .failed:
-            return .failed
-        case .offline, .ready:
-            return .idle
-        }
-    }
-}
-
 private struct GlobeKeyRepresentable: UIViewRepresentable {
     weak var controller: UIInputViewController?
     let isDark: Bool
@@ -413,15 +109,25 @@ private struct KeyboardChromePalette {
     var keyShadow: Color {
         Color.black.opacity(isDark ? 0.24 : 0.14)
     }
+
+    /// The return key's colours, as the full keyboard's (`FullKeyboardPalette`).
+    var actionFill: Color { Color(red: 0, green: 0x7A / 255.0, blue: 1) }
+    var actionPressedFill: Color { Color(red: 0, green: 0x62 / 255.0, blue: 0xCC / 255.0) }
+    var actionDisabledFill: Color {
+        isDark ? Color.white.opacity(0.39) : Color(red: 0xBF / 255.0, green: 0xC0 / 255.0, blue: 0xC5 / 255.0)
+    }
+    var returnDisabledInk: Color { textBase.opacity(0.1) }
 }
 
 private struct KeyboardKeyButtonStyle: ButtonStyle {
     let palette: KeyboardChromePalette
+    /// Another keycap colour, idle and pressed: the return key's blue.
+    var fill: (idle: Color, pressed: Color)?
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
-                configuration.isPressed ? palette.keyPressedFill : palette.keyFill,
+                configuration.isPressed ? fill?.pressed ?? palette.keyPressedFill : fill?.idle ?? palette.keyFill,
                 in: RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous)
             )
             .shadow(color: palette.keyShadow, radius: 0.5, x: 0, y: 1)
@@ -442,6 +148,7 @@ private struct TopBarTriggerButtonStyle: ButtonStyle {
 
 private struct RepeatDeleteKey: View {
     let palette: KeyboardChromePalette
+    var glyphOpacity: Double = 1
     let onDelete: () -> Void
     @State private var isPressing = false
     @State private var repeatTask: Task<Void, Never>?
@@ -450,7 +157,8 @@ private struct RepeatDeleteKey: View {
         Image(systemName: "delete.left")
             .font(.system(size: 15, weight: .medium))
             .foregroundStyle(palette.textBase)
-            .frame(width: 52, height: 42)
+            .opacity(glyphOpacity)
+            .frame(width: 44, height: 42)
             .background(
                 isPressing ? palette.keyPressedFill : palette.keyFill,
                 in: RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous)
@@ -478,6 +186,112 @@ private struct RepeatDeleteKey: View {
                     }
             )
             .accessibilityLabel("Delete")
+    }
+}
+
+/// The dictation bar's space bar, a cursor trackpad like the full keyboard's
+/// (`FullKeyboardEngine`): sliding `trackpadActivationDistance`, or holding still for
+/// `trackpadHoldDelay`, starts it, and each `trackpadPointsPerCharacter` along moves the cursor
+/// a character with a selection tick. Letting go of a trackpad types nothing; a tap types a space.
+private struct TrackpadSpaceKey: View {
+    let palette: KeyboardChromePalette
+    let minWidth: CGFloat
+    @Binding var isTrackpad: Bool
+    let onPress: () -> Void
+    let onSpace: () -> Void
+    let onMove: (Int) -> Void
+    let onStep: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @GestureState private var isTouching = false
+    @State private var isPressing = false
+    @State private var startX: CGFloat = 0
+    @State private var anchorX: CGFloat = 0
+    @State private var lastX: CGFloat = 0
+    @State private var holdTask: Task<Void, Never>?
+
+    var body: some View {
+        Text("space")
+            .font(.system(size: 15, weight: .regular))
+            .foregroundStyle(palette.textMuted)
+            .lineLimit(1)
+            .opacity(isTrackpad ? 0 : 1)
+            .frame(minWidth: minWidth, maxWidth: .infinity)
+            .frame(height: 42)
+            .background(
+                isPressing ? palette.keyPressedFill : palette.keyFill,
+                in: RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous)
+            )
+            .shadow(color: palette.keyShadow, radius: 0.5, x: 0, y: 1)
+            .contentShape(RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous))
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .updating($isTouching) { _, touching, _ in touching = true }
+                    .onChanged { value in moved(to: value.location.x, from: value.startLocation.x) }
+                    .onEnded { _ in finish(typesSpace: true) }
+            )
+            .onChange(of: isTouching) { _, touching in
+                guard !touching else { return }
+                // A cancelled touch never reaches onEnded, and types nothing; an ended one already finished.
+                DispatchQueue.main.async { finish(typesSpace: false) }
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { onSpace() }
+    }
+
+    private func moved(to x: CGFloat, from start: CGFloat) {
+        lastX = x
+        if !isPressing {
+            isPressing = true
+            startX = start
+            onPress()
+            holdTask?.cancel()
+            holdTask = Task { @MainActor in
+                try? await Task.sleep(for: .seconds(FullKeyboardEngine.trackpadHoldDelay))
+                guard !Task.isCancelled, isPressing, !isTrackpad else { return }
+                begin(at: lastX)
+            }
+        }
+        guard isTrackpad else {
+            if abs(x - startX) >= FullKeyboardEngine.trackpadActivationDistance {
+                begin(at: x)
+            }
+            return
+        }
+        let step = FullKeyboardEngine.trackpadPointsPerCharacter
+        let steps = Int(((x - anchorX) / step).rounded(.towardZero))
+        guard steps != 0 else { return }
+        anchorX += CGFloat(steps) * step
+        onMove(steps)
+        onStep()
+    }
+
+    private func begin(at x: CGFloat) {
+        holdTask?.cancel()
+        holdTask = nil
+        anchorX = x
+        setTrackpad(true)
+        onStep()
+    }
+
+    private func finish(typesSpace: Bool) {
+        holdTask?.cancel()
+        holdTask = nil
+        guard isPressing else { return }
+        isPressing = false
+        if isTrackpad {
+            setTrackpad(false)
+        } else if typesSpace {
+            onSpace()
+        }
+    }
+
+    /// The glyphs blank at once under Reduce Motion, as the full keyboard's do, else fade quickly.
+    private func setTrackpad(_ on: Bool) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.12)) {
+            isTrackpad = on
+        }
     }
 }
 
@@ -655,6 +469,10 @@ struct KeyboardSurfaceView: View {
     /// This press's hold started the dictation, so the Dictate button's tap action skips it.
     @State private var holdTookPress = false
     @GestureState private var isPressingWell = false
+    /// That long press's own touch-up, so it doesn't also pick the language.
+    @State private var removeTookPress = false
+    /// The space bar slides the cursor: the keys' glyphs blank out, as on the full keyboard.
+    @State private var isTrackpadActive = false
 
     private static let wellHeight: CGFloat = 44
     private static let controlHeight: CGFloat = 34
@@ -678,10 +496,25 @@ struct KeyboardSurfaceView: View {
     }
 
     var body: some View {
+        let showsMore = model.activeTray == .moreLanguages
         VStack(spacing: 8) {
             topBar
-            primaryStage
-            utilityRow
+            ZStack {
+                VStack(spacing: 8) {
+                    primaryStage
+                    utilityRow
+                }
+                .opacity(showsMore ? 0 : 1)
+                .allowsHitTesting(!showsMore)
+                .accessibilityHidden(showsMore)
+                if showsMore {
+                    moreLanguagesGrid(palette: palette)
+                        .transition(.opacity)
+                }
+            }
+        }
+        .onChange(of: model.activeTray) { _, _ in
+            removeTookPress = false
         }
         .padding(.horizontal, 10)
         .padding(.top, isHostedExtension ? 4 : 6)
@@ -704,6 +537,9 @@ struct KeyboardSurfaceView: View {
 
             languageTrayBar(palette: p)
                 .hexTrayReveal(model.activeTray == .language, reduceMotion: reduceMotion, offsetY: 3.5)
+
+            moreLanguagesBar(palette: p)
+                .hexTrayReveal(model.activeTray == .moreLanguages, reduceMotion: reduceMotion, offsetY: 3.5)
         }
         .frame(height: 26)
     }
@@ -741,12 +577,13 @@ struct KeyboardSurfaceView: View {
 
             Spacer(minLength: 4)
 
-            if model.showsLanguageSwitch || model.showsTranslationSwitch {
+            // The translation note takes the bar's width for its few seconds.
+            if model.showsLanguageSwitch || model.showsTranslationSwitch, model.translationNote == nil {
                 languageTrigger(palette: p)
             }
 
             styleTrigger(palette: p)
-                .hexTrayReveal(model.hasFullAccess, reduceMotion: reduceMotion, offsetY: 0)
+                .hexTrayReveal(model.hasFullAccess && model.translationNote == nil, reduceMotion: reduceMotion, offsetY: 0)
         }
         .frame(height: 26)
     }
@@ -778,10 +615,15 @@ struct KeyboardSurfaceView: View {
     private func leadingAccessory(palette p: KeyboardChromePalette) -> some View {
         let showNoAccess = !model.hasFullAccess
         let showRecordingClock = model.hasFullAccess && model.stagePhase == .recording
+        let showTranslationNote = model.hasFullAccess
+            && model.translationNote != nil
+            && model.stagePhase != .recording
+            && model.stagePhase != .transcribing
         let showWarmStatus = model.hasFullAccess
             && model.isWarmAvailable
             && model.stagePhase != .recording
             && model.stagePhase != .transcribing
+            && !showTranslationNote
 
         return ZStack(alignment: .leading) {
             HStack(spacing: 6) {
@@ -824,7 +666,36 @@ struct KeyboardSurfaceView: View {
                 }
             }
             .hexTrayReveal(showWarmStatus, reduceMotion: reduceMotion, offsetY: 2)
+
+            Group {
+                if let note = model.translationNote {
+                    translationNote(note, palette: p)
+                }
+            }
+            .hexTrayReveal(showTranslationNote, reduceMotion: reduceMotion, offsetY: 2)
         }
+    }
+
+    /// "Couldn't translate, pasted as spoken" over its fix; a tap opens Hex's Settings › Dictation.
+    private func translationNote(_ note: TranslationFailure, palette p: KeyboardChromePalette) -> some View {
+        Button {
+            model.onOpenURL?(KeyboardLaunchRequest.translationSettings.url)
+        } label: {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(TranslationFailure.note)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(p.textBase)
+                Text(note.fix)
+                    .font(.system(size: 11))
+                    .foregroundStyle(p.textMuted)
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Opens Hex's Settings")
     }
 
     private func styleTrigger(palette p: KeyboardChromePalette) -> some View {
@@ -877,14 +748,25 @@ struct KeyboardSurfaceView: View {
     }
 
     private func languageTrayBar(palette p: KeyboardChromePalette) -> some View {
-        let names = DictationLanguageSwitch.nativeNames(for: model.languageChoices)
+        // Apple Speech's languages here, as the Hex key menu names them: the chips and More
+        // languages together name a language's region where it has several ("Español (US)").
+        let names = DictationLanguageSwitch.nativeNames(
+            for: model.languageChoices,
+            supported: model.languageChoices + model.moreLanguages
+        )
         return HStack(spacing: 4) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
                     if model.showsLanguageSwitch {
-                        languageChip(id: nil, label: "Auto", palette: p)
+                        languageChip(id: nil, label: String(localized: "Auto"), palette: p)
                         ForEach(model.languageChoices, id: \.self) { id in
                             languageChip(id: id, label: names[id] ?? id, palette: p)
+                            if model.removingLanguage == id {
+                                removeChip(id: id, label: names[id] ?? id, palette: p)
+                            }
+                        }
+                        if !model.moreLanguages.isEmpty {
+                            moreChip(palette: p)
                         }
                     }
                 }
@@ -926,9 +808,21 @@ struct KeyboardSurfaceView: View {
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 
+    /// A language: a tap picks it; a long press offers Remove beside it (not Automatic).
     private func languageChip(id: String?, label: String, palette p: KeyboardChromePalette) -> some View {
         let active = model.dictationLanguage == id
         return Button {
+            if let id, model.removingLanguage == id {
+                // The long press's own release keeps Remove up; a later tap puts it away.
+                if removeTookPress {
+                    removeTookPress = false
+                } else {
+                    setRemovingLanguage(nil)
+                }
+                return
+            }
+            model.removingLanguage = nil
+            removeTookPress = false
             model.onKeyFeedback?()
             model.onLanguageSelected?(id)
             model.setActiveTray(.none, reduceMotion: reduceMotion)
@@ -941,7 +835,123 @@ struct KeyboardSurfaceView: View {
                 .background(active ? p.chipActiveFill : p.chipIdleFill, in: Capsule())
         }
         .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: Self.removeHoldDuration).onEnded { _ in
+                guard let id, model.removingLanguage != id else { return }
+                model.onSelectionStep?()
+                removeTookPress = true
+                setRemovingLanguage(id)
+            },
+            including: id == nil ? .subviews : .all
+        )
         .accessibilityLabel(id == nil ? "Automatic language" : label)
+        .accessibilityActions {
+            if let id {
+                Button("Remove") { model.onLanguageRemoved?(id) }
+            }
+        }
+    }
+
+    /// How long a language chip is held before Remove shows beside it.
+    private static let removeHoldDuration: Double = 0.45
+
+    private func setRemovingLanguage(_ id: String?) {
+        withAnimation(HexMotion.trayAnimation(reduceMotion: reduceMotion)) {
+            model.removingLanguage = id
+        }
+    }
+
+    private func removeChip(id: String, label: String, palette p: KeyboardChromePalette) -> some View {
+        Button {
+            model.onKeyFeedback?()
+            model.onLanguageRemoved?(id)
+            removeTookPress = false
+            setRemovingLanguage(nil)
+        } label: {
+            Text("Remove")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(HexTheme.danger)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(p.chipIdleFill, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .transition(.opacity)
+        .accessibilityLabel(Text("Remove \(label)"))
+    }
+
+    private func moreChip(palette p: KeyboardChromePalette) -> some View {
+        Button {
+            model.onKeyFeedback?()
+            model.setActiveTray(.moreLanguages, reduceMotion: reduceMotion)
+        } label: {
+            Text("More languages…")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(p.textMuted)
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+                .background(p.chipIdleFill, in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// More languages…'s bar: back to the language chips, and close.
+    private func moreLanguagesBar(palette p: KeyboardChromePalette) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                model.onKeyFeedback?()
+                model.setActiveTray(.language, reduceMotion: reduceMotion)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("More languages")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(p.textMuted)
+                .padding(.horizontal, 8)
+                .frame(height: 26)
+                .contentShape(Capsule())
+            }
+            .buttonStyle(TopBarTriggerButtonStyle(palette: p))
+            .accessibilityLabel("Back")
+            Spacer(minLength: 4)
+            closeTrayButton(palette: p)
+        }
+        .frame(height: 26)
+    }
+
+    /// Every other language Apple Speech has, in place of the keys; a tap picks it, which puts
+    /// it on the switch.
+    private func moreLanguagesGrid(palette p: KeyboardChromePalette) -> some View {
+        let names = DictationLanguageSwitch.nativeNames(for: model.languageChoices + model.moreLanguages)
+        return ScrollView(.vertical, showsIndicators: false) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 96), spacing: 6)], spacing: 6) {
+                ForEach(model.moreLanguages, id: \.self) { id in
+                    Button {
+                        model.onKeyFeedback?()
+                        model.onLanguageSelected?(id)
+                        model.setActiveTray(.none, reduceMotion: reduceMotion)
+                    } label: {
+                        Text(names[id] ?? id)
+                            .font(.system(size: 14, weight: .regular))
+                            .foregroundStyle(p.textBase)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .padding(.horizontal, 8)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 34)
+                            .background(p.chipIdleFill, in: Capsule())
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .hexScrollEdgeEffectHidden()
+        .frame(height: Self.wellHeight + 8 + Self.keyHeight)
     }
 
     private func closeTrayButton(palette p: KeyboardChromePalette) -> some View {
@@ -1170,12 +1180,34 @@ struct KeyboardSurfaceView: View {
 
     // MARK: - Bottom Utility Key Row (42 pt, shadow-grounded keycaps with zero strokes)
 
+    /// The bar's punctuation keys, the commonest first: as many as leave the space bar
+    /// `minSpaceWidth` (five on a 402 pt iPhone, three on the SE beside its globe).
+    private static let punctuation = [",", ".", "?", "!", "'", "\"", "@", "#"]
+    private static let punctuationKeyWidth: CGFloat = 30
+    private static let minSpaceWidth: CGFloat = 60
+    private static let keyHeight: CGFloat = 42
+
+    /// The keys' glyphs while the space bar slides the cursor: blank, as on the full keyboard.
+    private var glyphOpacity: Double { isTrackpadActive ? 0 : 1 }
+
     private var utilityRow: some View {
+        ViewThatFits(in: .horizontal) {
+            utilityKeys(punctuation: 8)
+            utilityKeys(punctuation: 6)
+            utilityKeys(punctuation: 5)
+            utilityKeys(punctuation: 4)
+            utilityKeys(punctuation: 3)
+            utilityKeys(punctuation: 2)
+        }
+    }
+
+    private func utilityKeys(punctuation count: Int) -> some View {
         let p = palette
-        return HStack(spacing: 6) {
+        return HStack(spacing: 5) {
             if model.needsGlobeKey {
                 GlobeKeyRepresentable(controller: model.inputViewController, isDark: p.isDark)
-                    .frame(width: 44, height: 42)
+                    .opacity(glyphOpacity)
+                    .frame(width: 38, height: 42)
                     .background(
                         p.keyFill,
                         in: RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous)
@@ -1183,20 +1215,48 @@ struct KeyboardSurfaceView: View {
                     .shadow(color: p.keyShadow, radius: 0.5, x: 0, y: 1)
             }
 
-            Button {
-                model.onKeyFeedback?()
-                model.onSpace?()
-            } label: {
-                Text("space")
-                    .font(.system(size: 15, weight: .regular))
-                    .foregroundStyle(p.textMuted)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 42)
-                    .contentShape(RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous))
+            if model.showsEmojiKey {
+                Button {
+                    model.onKeyFeedback?()
+                    model.onEmojiTap?()
+                } label: {
+                    Image(systemName: "face.smiling")
+                        .font(.system(size: 17, weight: .regular))
+                        .foregroundStyle(p.textBase)
+                        .opacity(glyphOpacity)
+                        .frame(width: 38, height: 42)
+                        .contentShape(RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous))
+                }
+                .buttonStyle(KeyboardKeyButtonStyle(palette: p))
+                .accessibilityLabel("Emoji")
             }
-            .buttonStyle(KeyboardKeyButtonStyle(palette: p))
 
-            RepeatDeleteKey(palette: p) {
+            ForEach(Self.punctuation.prefix(count), id: \.self) { mark in
+                Button {
+                    model.onKeyFeedback?()
+                    model.onInsertText?(mark)
+                } label: {
+                    Text(mark)
+                        .font(.system(size: 19, weight: .regular))
+                        .foregroundStyle(p.textBase)
+                        .opacity(glyphOpacity)
+                        .frame(width: Self.punctuationKeyWidth, height: 42)
+                        .contentShape(RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous))
+                }
+                .buttonStyle(KeyboardKeyButtonStyle(palette: p))
+            }
+
+            TrackpadSpaceKey(
+                palette: p,
+                minWidth: Self.minSpaceWidth,
+                isTrackpad: $isTrackpadActive,
+                onPress: { model.onKeyFeedback?() },
+                onSpace: { model.onSpace?() },
+                onMove: { model.onMoveCursor?($0) },
+                onStep: { model.onSelectionStep?() }
+            )
+
+            RepeatDeleteKey(palette: p, glyphOpacity: glyphOpacity) {
                 model.onKeyFeedback?()
                 model.onDelete?()
             }
@@ -1205,14 +1265,30 @@ struct KeyboardSurfaceView: View {
                 model.onKeyFeedback?()
                 model.onReturn?()
             } label: {
-                Image(systemName: "return")
+                Image(systemName: model.returnKey.symbol)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(p.textBase)
-                    .frame(width: 56, height: 42)
+                    .foregroundStyle(returnInk(p))
+                    .opacity(glyphOpacity)
+                    .frame(width: 48, height: 42)
                     .contentShape(RoundedRectangle(cornerRadius: HexTheme.controlRadius, style: .continuous))
             }
-            .buttonStyle(KeyboardKeyButtonStyle(palette: p))
-            .accessibilityLabel(model.returnKeyLabel)
+            .buttonStyle(KeyboardKeyButtonStyle(palette: p, fill: returnFill(p)))
+            .disabled(!model.returnKeyEnabled)
+            .accessibilityLabel(model.returnKey.accessibilityLabel)
         }
+    }
+
+    /// Send, go, search and the other acting types are blue, grey while the field is empty and
+    /// the host turns them off; plain while the space bar is a trackpad, as on the full keyboard.
+    private func returnFill(_ p: KeyboardChromePalette) -> (idle: Color, pressed: Color)? {
+        guard model.returnKey.isAction, !isTrackpadActive else { return nil }
+        return model.returnKeyEnabled
+            ? (p.actionFill, p.actionPressedFill)
+            : (p.actionDisabledFill, p.actionDisabledFill)
+    }
+
+    private func returnInk(_ p: KeyboardChromePalette) -> Color {
+        if !model.returnKeyEnabled { return p.returnDisabledInk }
+        return model.returnKey.isAction ? .white : p.textBase
     }
 }

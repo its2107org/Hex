@@ -1,5 +1,13 @@
 import Foundation
 
+/// How hard the keys' haptic tap is (Settings › Keyboard › Strength). Medium is meant to match
+/// Apple's keyboard (testers found Hex's, a 0.65 light impact, too weak beside it).
+nonisolated enum KeyHapticStrength: String, CaseIterable, Sendable {
+    case light
+    case medium
+    case strong
+}
+
 /// The full keyboard's switches in the shared App Group.
 ///
 /// Without Full Access an iPhone may not let the keyboard read the App Group (the simulator
@@ -20,8 +28,10 @@ struct FullKeyboardSettings {
         static let autocorrect = "settings.keyboardAutocorrect"
         static let autoCapitalization = "settings.keyboardAutoCapitalization"
         static let spatialAutocorrect = "experiments.spatialAutocorrect"
+        static let germanSpatialAutocorrect = "experiments.germanSpatialAutocorrect"
         static let keyPopups = "settings.keyboardKeyPopups"
         static let haptics = "settings.keyboardHaptics"
+        static let hapticStrength = "settings.keyboardHapticStrength"
         static let suggestSwearWords = "settings.keyboardSuggestSwearWords"
         static let emoji = "experiments.emoji"
         static let swipeTyping = "experiments.swipeTyping"
@@ -72,6 +82,26 @@ struct FullKeyboardSettings {
         nonmutating set { defaults?.set(newValue, forKey: Key.spatialAutocorrect) }
     }
 
+    /// Settings › Experiments › German spatial autocorrect: lets the Deutsch layout read your
+    /// taps with the German model Android ships (`TypingDecoder`), as English and Spanish
+    /// already do. Off by default, like every experiment: a keyboard without it types German
+    /// exactly as before (the dictionary engine, and no word list for the letter odds, the
+    /// strip or a bilingual partner). Stored as `experiments.germanSpatialAutocorrect`.
+    var germanSpatialAutocorrect: Bool {
+        get { defaults?.object(forKey: Key.germanSpatialAutocorrect) as? Bool ?? false }
+        nonmutating set { defaults?.set(newValue, forKey: Key.germanSpatialAutocorrect) }
+    }
+
+    /// The typing model the keyboard may read `language`'s taps with: its bundled model, with
+    /// German's only while both Spatial autocorrect and the German experiment are on. English
+    /// and Spanish never wait on the experiment. The keyboard asks this for the word list, the
+    /// decoder and a bilingual partner, so one gate keeps a German model out of everything
+    /// until it is chosen; `TypingDecoderModel.bundled` still loads any bundled file for tests.
+    func typingModel(for language: KeyboardLanguage) -> TypingDecoderModel? {
+        if language == .german, !(spatialAutocorrect && germanSpatialAutocorrect) { return nil }
+        return TypingDecoderModel.bundled(language.rawValue)
+    }
+
     /// Suggestions and autocorrect may offer swear words (`OffensiveWords`); slurs never.
     /// Off by default, like Apple's keyboard.
     var suggestSwearWords: Bool {
@@ -89,6 +119,13 @@ struct FullKeyboardSettings {
     var haptics: Bool {
         get { defaults?.object(forKey: Key.haptics) as? Bool ?? true }
         nonmutating set { defaults?.set(newValue, forKey: Key.haptics) }
+    }
+
+    /// Settings › Keyboard › Strength, under Haptics: how hard each key's tap is. Medium, the
+    /// default, is meant to feel like Apple's keyboard.
+    var hapticStrength: KeyHapticStrength {
+        get { defaults?.string(forKey: Key.hapticStrength).flatMap(KeyHapticStrength.init(rawValue:)) ?? .medium }
+        nonmutating set { defaults?.set(newValue.rawValue, forKey: Key.hapticStrength) }
     }
 
     /// Settings › Keyboard › Emoji: an emoji key whose panel suggests emoji for what you just

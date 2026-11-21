@@ -83,21 +83,7 @@ extension FullKeyboardView {
     /// The row's suggestions for the text before the cursor and your use, and the grid's
     /// Frequently used.
     func fillEmojiPanel() {
-        guard let panel = emojiPanel else { return }
-        let library = panel.library
-        var usage: [Int: Float] = [:]
-        var frequent: [Int] = []
-        for (emoji, score) in panel.usage.ranked(limit: 32) {
-            guard let entry = library.entryByEmoji[emoji], usage[entry] == nil else { continue }
-            usage[entry] = score
-            frequent.append(entry)
-        }
-        for emoji in EmojiSuggester.defaults where frequent.count < 16 {
-            if let entry = library.entryByEmoji[emoji], !frequent.contains(entry) { frequent.append(entry) }
-        }
-        let context = EmojiContext(before: routedTarget.document.documentContextBeforeInput, stopwords: library.stopwords)
-        let suggestions = EmojiSuggester.suggestions(context: context, library: library, usage: usage, limit: 10)
-        panel.show(suggestions: suggestions, frequent: frequent)
+        emojiPanel?.fill(before: routedTarget.document.documentContextBeforeInput)
     }
 
     func closeEmojiPanel() {
@@ -155,6 +141,7 @@ extension FullKeyboardView {
         addSubview(field)
         emojiSearchField = field
         let results = EmojiRowView()
+        results.renderer = panel.glyphs
         results.palette = palette
         results.fontSize = panel.rowFontSize
         results.emptyText = "No emoji"
