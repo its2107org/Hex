@@ -7,3 +7,5 @@ Our own copy of the iPhone app from [Hex](https://github.com/anomalyco/hex) (MIT
 - **2. Daily update** copies the original each morning and, if the iPhone app changed, builds and sends it to TestFlight.
 - **3. Build Hex** also runs on the 1st of each month so the TestFlight copy never expires.
 - **1. Set up with Apple**: identifiers, certificates, testers.
+
+Source: https://github.com/anomalyco/hex
