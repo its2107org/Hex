@@ -1,4 +1,4 @@
-# Hex for Ian's iPhone
+# Hex for Ian’s iPhone
 
 Our own copy of the iPhone app from [Hex](https://github.com/anomalyco/hex) (MIT licence), built for Ian's TestFlight.
 
