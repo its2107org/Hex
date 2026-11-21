@@ -9,3 +9,4 @@ Our own copy of the iPhone app from [Hex](https://github.com/anomalyco/hex) (MIT
 - **1. Set up with Apple**: identifiers, certificates, testers.
 
 Source: https://github.com/anomalyco/hex
+Our copy builds automatically; see the Actions tab.
