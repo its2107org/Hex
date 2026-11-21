@@ -6,7 +6,11 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root/ios"
 
-# anomaly.hex.mobile -> com.<team>.hex (bundle IDs, App Group, URL names)
+# App Group (registered by hand at developer.apple.com, so it has a fixed, simple name)
+grep -rlI "group\.anomaly\.hex\.mobile" . | while read -r f; do
+  sed -i '' "s/group\.anomaly\.hex\.mobile/group.its2107org.hex/g" "$f"
+done
+# anomaly.hex.mobile -> com.<team>.hex (bundle IDs, URL names)
 grep -rlI "anomaly\.hex\.mobile" . | while read -r f; do
   sed -i '' "s/anomaly\.hex\.mobile/com.${TEAMID}.hex/g" "$f"
 done
