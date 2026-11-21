@@ -4,6 +4,16 @@
 set -euo pipefail
 : "${TEAMID:?TEAMID secret missing}"
 root=$(cd "$(dirname "$0")/.." && pwd)
+# Our small fixes on top of the original (skipped, with a warning, if the original changed there)
+for p in "$root"/patches/*.patch; do
+  [ -e "$p" ] || continue
+  if git -C "$root" apply --check "$p" 2>/dev/null; then
+    git -C "$root" apply "$p" && echo "Applied $(basename "$p")"
+  else
+    echo "::warning::$(basename "$p") no longer applies to the original; skipped"
+  fi
+done
+
 cd "$root/ios"
 
 # App Group (registered by hand at developer.apple.com, so it has a fixed, simple name)

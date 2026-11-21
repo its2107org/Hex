@@ -1,0 +1,14 @@
+diff --git a/ios/HEXMobile/KeyboardSpeechPreparation.swift b/ios/HEXMobile/KeyboardSpeechPreparation.swift
+index a83e0c4..ee58e18 100644
+--- a/ios/HEXMobile/KeyboardSpeechPreparation.swift
++++ b/ios/HEXMobile/KeyboardSpeechPreparation.swift
+@@ -60,6 +60,9 @@ final class KeyboardSpeechPreparation {
+         }
+         guard !Task.isCancelled else { return }
+         if appEngine() == "Apple Speech" {
++            // Hex's own model is the keyboard's, and it's in place: end any handoff the
++            // keyboard marked earlier (say, before Full Access), so its Hex key dictates again.
++            LanguageSettings().clearKeyboardNeedsHex()
+             state = .followsApp
+             return
+         }

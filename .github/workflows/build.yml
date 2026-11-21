@@ -45,6 +45,16 @@ jobs:
         run: |
           f=$(ls buildlog/*.log 2>/dev/null | head -1) || true
           [ -n "$f" ] && grep -E "error:|Provisioning profile" "$f" | sort -u | head -20 | while read -r l; do echo "::error::${l:0:400}"; done || true
+      - name: Check the keyboard can share with the app
+        run: |
+          rm -rf /tmp/ipa && mkdir /tmp/ipa && unzip -q Hex.ipa -d /tmp/ipa
+          for b in /tmp/ipa/Payload/*.app /tmp/ipa/Payload/*.app/PlugIns/*.appex; do
+            if codesign -d --entitlements :- "$b" 2>/dev/null | grep -q "group.its2107org.hex"; then
+              echo "::notice::$(basename "$b") has the App Group"
+            else
+              echo "::warning::$(basename "$b") has no App Group"
+            fi
+          done
       - name: Send to TestFlight
         run: bundle exec fastlane release
         env:
