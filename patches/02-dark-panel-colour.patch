@@ -1,0 +1,14 @@
+diff --git a/ios/HEXShared/FullKeyboard/KeyboardBackdropView.swift b/ios/HEXShared/FullKeyboard/KeyboardBackdropView.swift
+index 42149a4..8990731 100644
+--- a/ios/HEXShared/FullKeyboard/KeyboardBackdropView.swift
++++ b/ios/HEXShared/FullKeyboard/KeyboardBackdropView.swift
+@@ -19,7 +19,8 @@ final class KeyboardBackdropView: UIView {
+     /// light over white (over Safari's light grey page it's 224, 225, 232).
+     nonisolated static func fill(isDark: Bool) -> UIColor {
+         isDark
+-            ? UIColor(red: 34 / 255, green: 34 / 255, blue: 35 / 255, alpha: 1)
++            // Ian's iPhone: the system panel around the keyboard measures 22, 22, 24.
++            ? UIColor(red: 22 / 255, green: 22 / 255, blue: 24 / 255, alpha: 1)
+             : UIColor(red: 226 / 255, green: 227 / 255, blue: 232 / 255, alpha: 1)
+     }
+ 
