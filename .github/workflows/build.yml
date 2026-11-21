@@ -1,3 +1,4 @@
+# Our copy of Hex (its2107org)
 name: 3. Build Hex
 run-name: Build Hex for TestFlight
 on:
