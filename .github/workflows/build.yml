@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - name: Select Xcode
         run: scripts/select-xcode.sh
       - name: Install fastlane

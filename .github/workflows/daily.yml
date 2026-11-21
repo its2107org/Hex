@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
       - name: Copy the latest iPhone app from anomalyco/hex
         id: sync
         run: scripts/sync-upstream.sh | tee -a "$GITHUB_OUTPUT"
@@ -28,7 +28,7 @@ jobs:
           git config user.email "hex-sync@users.noreply.github.com"
           git add -A ios app tests LICENSE UPSTREAM_COMMIT
           git commit -q -m "Update from the original Hex (${{ steps.sync.outputs.upstream }})"
-          git push origin HEAD:main
+          git push origin HEAD:${{ github.ref_name }}
           echo "::notice::New changes copied; building a new TestFlight version"
       - name: Nothing new
         if: steps.sync.outputs.changed != 'true'
