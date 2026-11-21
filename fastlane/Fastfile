@@ -1,0 +1,201 @@
+# Builds our copy of Hex (the iPhone app) and sends it to TestFlight. Uses the same Apple setup as Ian's Trio build
+# (the same secrets and the same Match-Secrets certificate store).
+
+default_platform(:ios)
+
+TEAMID = ENV["TEAMID"].to_s
+GH_PAT = ENV["GH_PAT"]
+GITHUB_WORKSPACE = ENV["GITHUB_WORKSPACE"] || File.expand_path("..", __dir__)
+GITHUB_REPOSITORY_OWNER = ENV["GITHUB_REPOSITORY_OWNER"]
+ENV["FASTLANE_XCODEBUILD_SETTINGS_TIMEOUT"] = "120"
+
+BUNDLE_ID = "com.#{TEAMID}.hex"
+APP_GROUP = "group.com.#{TEAMID}.hex"
+PROJECT = "#{GITHUB_WORKSPACE}/ios/HEXMobile.xcodeproj"
+IDENTIFIERS = {
+  "HEXMobile" => BUNDLE_ID,
+  "HEXKeyboard" => "#{BUNDLE_ID}.keyboard",
+  "HEXWidgets" => "#{BUNDLE_ID}.widgets"
+}
+
+def api_key
+  app_store_connect_api_key(
+    key_id: ENV["FASTLANE_KEY_ID"],
+    issuer_id: ENV["FASTLANE_ISSUER_ID"],
+    key_content: ENV["FASTLANE_KEY"]
+  )
+end
+
+def match_auth
+  Base64.strict_encode64("#{GITHUB_REPOSITORY_OWNER}:#{GH_PAT}")
+end
+
+def report_app_group
+  Dir[File.expand_path("~/Library/MobileDevice/Provisioning Profiles/*.mobileprovision")].each do |p|
+    text = `security cms -D -i "#{p}" 2>/dev/null`
+    next unless text.include?("#{BUNDLE_ID}<") || text.include?("#{BUNDLE_ID}.keyboard<")
+    ok = text.include?(APP_GROUP)
+    puts "::#{ok ? 'notice' : 'warning'}::Profile #{File.basename(p)} #{ok ? 'includes' : 'does NOT include'} the App Group"
+  end
+end
+
+platform :ios do
+  desc "Create the app's identifiers with Apple"
+  lane :identifiers do
+    api_key
+
+    names = { BUNDLE_ID => "Hex", "#{BUNDLE_ID}.keyboard" => "Hex Keyboard", "#{BUNDLE_ID}.widgets" => "Hex Widgets" }
+    names.each do |identifier, name|
+      bundle = Spaceship::ConnectAPI::BundleId.find(identifier) ||
+        Spaceship::ConnectAPI::BundleId.create(name: name, identifier: identifier, platform: "IOS")
+      UI.success("Identifier ready: #{identifier}")
+      next if identifier.end_with?(".widgets")
+      begin
+        caps = bundle.get_capabilities.map(&:capability_type)
+        unless caps.include?("APP_GROUPS")
+          bundle.create_capability("APP_GROUPS")
+          UI.success("App Groups switched on for #{identifier}")
+        end
+      rescue => e
+        UI.important("Could not switch on App Groups for #{identifier}: #{e.message}")
+      end
+    end
+    UI.important("App Group #{APP_GROUP} must exist and be ticked on the app and keyboard identifiers at developer.apple.com (Apple's API can't do this part)")
+  end
+
+  desc "Create or refresh signing certificates and profiles"
+  lane :certs do
+    setup_ci if ENV["CI"]
+    api_key
+    match(
+      type: "appstore",
+      readonly: false,
+      force_for_new_devices: false,
+      git_basic_authorization: match_auth,
+      app_identifier: IDENTIFIERS.values
+    )
+    report_app_group
+  end
+
+  desc "Build Hex"
+  lane :build_hex do
+    setup_ci if ENV["CI"]
+    key = api_key
+
+    update_project_team(path: PROJECT, teamid: TEAMID)
+
+    previous = latest_testflight_build_number(app_identifier: BUNDLE_ID, api_key: key, initial_build_number: 0)
+    increment_build_number(xcodeproj: PROJECT, build_number: previous + 1)
+
+    match(
+      type: "appstore",
+      readonly: true,
+      git_basic_authorization: match_auth,
+      app_identifier: IDENTIFIERS.values
+    )
+    mapping = Actions.lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]
+
+    IDENTIFIERS.each do |target, identifier|
+      update_code_signing_settings(
+        path: PROJECT,
+        use_automatic_signing: false,
+        team_id: TEAMID,
+        profile_name: mapping[identifier],
+        code_sign_identity: "iPhone Distribution",
+        targets: [target]
+      )
+    end
+
+    gym(
+      project: PROJECT,
+      scheme: "HEXMobile",
+      configuration: "Release",
+      export_method: "app-store",
+      output_name: "Hex.ipa",
+      destination: "generic/platform=iOS",
+      xcargs: "DEVELOPMENT_TEAM=#{TEAMID}",
+      buildlog_path: "buildlog"
+    )
+  end
+
+  desc "Send to TestFlight"
+  lane :release do
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: "Hex.ipa",
+      skip_waiting_for_build_processing: true,
+      changelog: "Hex, original version #{File.read(File.join(GITHUB_WORKSPACE, "UPSTREAM_COMMIT"))[0, 7] rescue "unknown"}"
+    )
+  end
+
+  desc "Check the secrets and Apple access work"
+  lane :check_setup do
+    setup_ci if ENV["CI"]
+    api_key
+    found = IDENTIFIERS.values.map { |id| [id, !Spaceship::ConnectAPI::BundleId.find(id).nil?] }
+    found.each { |id, ok| UI.message("#{ok ? 'Found' : 'Missing'} identifier #{id}") }
+    app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+    UI.message(app ? "App record exists in App Store Connect" : "No app record yet in App Store Connect")
+    match(type: "appstore", readonly: true, git_basic_authorization: match_auth, app_identifier: [])
+    UI.success("Secrets work and the certificate store is reachable")
+    profiles = Dir[File.expand_path("~/Library/MobileDevice/Provisioning Profiles/*.mobileprovision")]
+    profiles.each do |p|
+      text = `security cms -D -i "#{p}" 2>/dev/null`
+      next unless text.include?(BUNDLE_ID)
+      UI.message("Profile #{File.basename(p)} #{text.include?(APP_GROUP) ? 'includes' : 'does NOT include'} the App Group")
+    end
+  end
+
+  desc "Make sure Ian is set up as a TestFlight tester (safe to repeat)"
+  lane :testers do
+    api_key
+    app = Spaceship::ConnectAPI::App.find(BUNDLE_ID)
+    UI.user_error!("No App Store Connect app for #{BUNDLE_ID}") unless app
+
+    group = app.get_beta_groups.find { |g| g.name == "Me" }
+    unless group
+      # Sent by hand: fastlane's own helper adds a public-link setting Apple now rejects for internal groups.
+      Spaceship::ConnectAPI.client.test_flight_request_client.post("v1/betaGroups", {
+        data: {
+          type: "betaGroups",
+          attributes: { name: "Me", isInternalGroup: true, hasAccessToAllBuilds: true },
+          relationships: { app: { data: { type: "apps", id: app.id } } }
+        }
+      })
+      group = app.get_beta_groups.find { |g| g.name == "Me" }
+      UI.user_error!("Group 'Me' was not created") unless group
+      UI.success("Created internal TestFlight group 'Me' with automatic distribution")
+    end
+
+    users = Spaceship::ConnectAPI::User.all
+    UI.message("Found #{users.count} App Store Connect user(s)")
+    users.each do |user|
+      email = user.email.to_s.empty? ? user.username.to_s : user.email.to_s
+      next if email.empty?
+      begin
+        Spaceship::ConnectAPI.post_beta_tester_assignment(
+          beta_group_ids: [group.id],
+          attributes: { email: email, firstName: user.first_name, lastName: user.last_name }
+        )
+        UI.success("Added a team member to the 'Me' TestFlight group")
+      rescue => e
+        UI.important("Tester not added (may already be in the group): #{e.message}")
+      end
+    end
+
+    testers = Spaceship::ConnectAPI::BetaTester.all(filter: { betaGroups: group.id })
+    UI.user_error!("No testers in the 'Me' group") if testers.empty?
+    UI.success("'Me' group has #{testers.count} tester(s)")
+
+    # Give the newest build to the group too, in case it arrived before the group existed.
+    build = Spaceship::ConnectAPI::Build.all(app_id: app.id, sort: "-uploadedDate", limit: 1).first
+    if build
+      begin
+        build.add_beta_groups(beta_groups: [group])
+        UI.success("Newest build shared with the group")
+      rescue => e
+        UI.important("Could not share newest build yet (#{e.message}); automatic distribution will cover it")
+      end
+    end
+  end
+end

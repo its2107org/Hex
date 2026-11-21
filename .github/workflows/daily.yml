@@ -1,0 +1,41 @@
+name: 2. Daily update from the original Hex
+on:
+  workflow_dispatch:
+  schedule:
+    # Every day at about 7am New York time.
+    - cron: "41 11 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Copy any changes from the original
+    runs-on: ubuntu-24.04
+    outputs:
+      changed: ${{ steps.sync.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: main
+      - name: Copy the latest iPhone app from anomalyco/hex
+        id: sync
+        run: scripts/sync-upstream.sh | tee -a "$GITHUB_OUTPUT"
+      - name: Save the changes
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          git config user.name "hex-sync"
+          git config user.email "hex-sync@users.noreply.github.com"
+          git add -A ios app tests LICENSE UPSTREAM_COMMIT
+          git commit -q -m "Update from the original Hex (${{ steps.sync.outputs.upstream }})"
+          git push origin HEAD:main
+          echo "::notice::New changes copied; building a new TestFlight version"
+      - name: Nothing new
+        if: steps.sync.outputs.changed != 'true'
+        run: echo "::notice::No changes to the iPhone app today"
+
+  build:
+    needs: sync
+    if: needs.sync.outputs.changed == 'true'
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
