@@ -31,7 +31,7 @@ def match_auth
 end
 
 def report_app_group
-  Dir[File.expand_path("~/Library/MobileDevice/Provisioning Profiles/*.mobileprovision")].each do |p|
+  Dir[File.expand_path("~/Library/MobileDevice/Provisioning Profiles/*.mobileprovision"), File.expand_path("~/Library/Developer/Xcode/UserData/Provisioning Profiles/*.mobileprovision")].each do |p|
     text = `security cms -D -i "#{p}" 2>/dev/null`
     next unless text.include?("#{BUNDLE_ID}<") || text.include?("#{BUNDLE_ID}.keyboard<")
     ok = text.include?(APP_GROUP)
@@ -97,6 +97,7 @@ platform :ios do
       git_basic_authorization: match_auth,
       app_identifier: IDENTIFIERS.values
     )
+    report_app_group
     mapping = Actions.lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]
 
     IDENTIFIERS.each do |target, identifier|
