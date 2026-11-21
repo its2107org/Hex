@@ -4,14 +4,12 @@
 set -euo pipefail
 : "${TEAMID:?TEAMID secret missing}"
 root=$(cd "$(dirname "$0")/.." && pwd)
-# Our small fixes on top of the original (skipped, with a warning, if the original changed there)
-for p in "$root"/patches/*.patch; do
+# Our small fixes on top of the original (patches/*.py edit the copied files at build time).
+# If the original changed so a fix can't find its place, the build stops, so a fix is never lost quietly.
+for p in "$root"/patches/*.py; do
   [ -e "$p" ] || continue
-  if git -C "$root" apply --check "$p" 2>/dev/null; then
-    git -C "$root" apply "$p" && echo "Applied $(basename "$p")"
-  else
-    echo "::warning::$(basename "$p") no longer applies to the original; skipped"
-  fi
+  (cd "$root" && python3 "$p") || { echo "::error::$(basename "$p") could not be applied to the latest original"; exit 1; }
+  echo "Applied $(basename "$p")"
 done
 
 cd "$root/ios"

@@ -12,6 +12,6 @@ Source: https://github.com/anomalyco/hex
 Our copy builds automatically; see the Actions tab.
 
 ## Our fixes
-Kept in `patches/` and re-applied to the freshly copied original on every build, so the daily update never loses them. If the original changes the same lines, the build shows a warning and skips that fix.
+Small scripts in `patches/` that edit the freshly copied original on every build, so the daily update never loses them. Each one finds its place by looking for a line rather than an exact copy, so it keeps working when the original changes nearby. If it can't find its place at all, the build stops rather than ship without the fix.
 - 01: the keyboard no longer stays stuck on "Open Hex to download English" after Hex has the speech files.
 - 02: the keyboard's dark background matches the iOS panel around it (22, 22, 24).
