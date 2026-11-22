@@ -9,8 +9,13 @@ final class AutocorrectEngineTests: XCTestCase {
     private var target: FixtureTextTarget!
     private var engine: FullKeyboardEngine!
     private var now: TimeInterval = 200
+    /// The layouts and dictionaries below are Apple's iOS 27 keyboard; CI's newest simulator
+    /// runtime is iOS 26.5, so the version these tests describe is pinned.
+    private var runningSystemMajorVersion = 0
 
     override func setUp() async throws {
+        runningSystemMajorVersion = KeyboardLanguage.systemMajorVersion
+        KeyboardLanguage.systemMajorVersion = 27
         suiteName = "AutocorrectEngineTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         target = FixtureTextTarget()
@@ -24,6 +29,7 @@ final class AutocorrectEngineTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        KeyboardLanguage.systemMajorVersion = runningSystemMajorVersion
         defaults.removePersistentDomain(forName: suiteName)
     }
 
@@ -644,6 +650,56 @@ final class AutocorrectEngineTests: XCTestCase {
         XCTAssertEqual(AutocorrectEngine.sentenceStarters(.czech).count, 3)
     }
 
+    /// Hungarian types with iOS's hu dictionary, and a missing accent is the cheapest fix there
+    /// is, however many a word lacks ("koszonom" -> "köszönöm", "kesobb" -> "később"); ő and ű
+    /// are o and u with the combining double acute, so each is one edit like á or é, where
+    /// another language's layout counts an edit per accent. A two-letter non-word takes its
+    /// accent too ("es" -> "és"). A word of its own is never accented ("meg", "kor" stay though
+    /// the dictionary offers "még", "kör", and "az" and "is" stay): the checker knows it as
+    /// typed. The fixes run against a stub dictionary answering as an iPhone's would.
+    func testHungarianRestoresMissingDiacritics() {
+        XCTAssertEqual(AutocorrectEngine.singleEditKeyboardCost(from: "szivesen", to: "szívesen", language: .hungarian)!, 0.15, accuracy: 0.001)
+        XCTAssertEqual(AutocorrectEngine.singleEditKeyboardCost(from: "talalkozunk", to: "találkozunk", language: .hungarian)!, 0.15, accuracy: 0.001)
+        XCTAssertEqual(AutocorrectEngine.singleEditKeyboardCost(from: "koszonom", to: "köszönöm", language: .hungarian)!, 0.25, accuracy: 0.001)
+        XCTAssertEqual(AutocorrectEngine.singleEditKeyboardCost(from: "kesobb", to: "később", language: .hungarian)!, 0.20, accuracy: 0.001)
+        XCTAssertEqual(AutocorrectEngine.singleEditKeyboardCost(from: "kor", to: "kör", language: .hungarian)!, 0.15, accuracy: 0.001)
+        XCTAssertNil(AutocorrectEngine.singleEditKeyboardCost(from: "koszonom", to: "köszönöm", language: .english), "three edits elsewhere")
+        XCTAssertNil(AutocorrectEngine.singleEditKeyboardCost(from: "kesobb", to: "később", language: .english), "two edits elsewhere")
+        engine.language = .hungarian
+        XCTAssertEqual(engine.autocorrect.language, .hungarian)
+        XCTAssertNil(engine.autocorrect.decoder, "no Hungarian typing model")
+        XCTAssertEqual(AutocorrectEngine.sentenceStarters(.hungarian).count, 3)
+        XCTAssertEqual(AutocorrectEngine.clauseStarters(.hungarian).count, 3)
+        XCTAssertEqual(AutocorrectEngine.commonWords(.hungarian).count, 6)
+
+        let hungarian = stubbed {
+            $0.valid = ["köszönöm", "szívesen", "kérem", "kerek", "találkozunk", "később", "üdvözlöm", "meg", "még", "kor", "kör", "szépen", "az", "és", "is"]
+            // "kerek" is one adjacent key (m to k) from "kerem" and listed first; "kérem" only
+            // lacks its accent, and wins.
+            $0.guessTable = [
+                "koszonom": ["köszönöm"], "szivesen": ["szívesen"], "kerem": ["kerek", "kérem"],
+                "talalkozunk": ["találkozunk"], "kesobb": ["később"], "udvozlom": ["üdvözlöm"],
+                "meg": ["még"], "kor": ["kör"],
+            ]
+        }
+        hungarian.setLanguage(.hungarian, available: ["hu", "en_US"])
+        XCTAssertEqual(fix(hungarian, "koszonom"), "köszönöm")
+        XCTAssertEqual(fix(hungarian, "Koszonom"), "Köszönöm")
+        XCTAssertEqual(fix(hungarian, "szivesen"), "szívesen")
+        XCTAssertEqual(fix(hungarian, "kerem"), "kérem", "over kerek, one adjacent key away and listed first")
+        XCTAssertEqual(fix(hungarian, "talalkozunk"), "találkozunk")
+        XCTAssertEqual(fix(hungarian, "kesobb"), "később")
+        XCTAssertEqual(fix(hungarian, "udvozlom"), "üdvözlöm")
+        XCTAssertNil(fix(hungarian, "meg"), "meg is a word: no accent put on it")
+        XCTAssertNil(fix(hungarian, "kor"), "kor is one too")
+        XCTAssertNil(fix(hungarian, "szépen"), "a word stays")
+        XCTAssertEqual(fix(hungarian, "es"), "és", "a two-letter non-word takes its accent")
+        XCTAssertNil(fix(hungarian, "az"), "az is a word: no accent put on it")
+        XCTAssertNil(fix(hungarian, "is"), "is is one too")
+        hungarian.setLanguage(.spanish, available: ["hu", "es_ES"])
+        XCTAssertNil(fix(hungarian, "koszonom"), "three accents are three edits on another layout")
+    }
+
     /// TestFlight (build 56): "Autocomplete suggests English words in Czech too." With Czech
     /// and English chosen, a sentence the words before show is Czech (`languageLean`) gets
     /// Czech completions only, none of English's even where Czech has none, and an English
@@ -779,6 +835,36 @@ final class AutocorrectEngineTests: XCTestCase {
         engine.replacementOnSpace(beforeInput: before, field: .text, autocorrectionType: .default)?.replacement
     }
 
+    /// French elisions ("l'", "qu'"), typed on the AZERTY's apostrophe key: a slip on either
+    /// side of the apostrophe is fixed as a word of its own, an elision a key away from the one
+    /// typed becomes it, and a whole word the dictionary knows, a lone "l'" and every other
+    /// language's apostrophes stay as typed.
+    func testFrenchElisionsAreCorrectedOnEitherSide() {
+        let french = stubbed {
+            $0.valid = ["homme", "il", "ici", "est", "accord", "ai", "aujourd'hui"]
+            $0.guessTable = ["hpmme": ["homme"], "eat": ["est"], "acvord": ["accord"]]
+        }
+        french.setLanguage(.french, available: ["fr_FR"])
+        XCTAssertEqual(fix(french, before: "l'hpmme"), "l'homme")
+        XCTAssertEqual(fix(french, before: "Je dis l'hpmme"), "l'homme")
+        XCTAssertEqual(fix(french, before: "L'hpmme"), "L'homme")
+        XCTAssertEqual(fix(french, before: "d'acvord"), "d'accord")
+        XCTAssertEqual(fix(french, before: "c'eat"), "c'est")
+        XCTAssertEqual(fix(french, before: "k'homme"), "l'homme", "a slip in the elision")
+        XCTAssertEqual(fix(french, before: "qi'il"), "qu'il")
+        XCTAssertNil(fix(french, before: "l'homme"))
+        XCTAssertNil(fix(french, before: "j'ai"))
+        XCTAssertNil(fix(french, before: "aujourd'hui"))
+        XCTAssertNil(fix(french, before: "l'"))
+        XCTAssertNil(fix(french, before: "zz'homme"), "no elision a key away")
+        let english = stubbed {
+            $0.valid = ["man"]
+            $0.guessTable = ["hpmme": ["homme"]]
+        }
+        english.setLanguage(.english, available: ["en_US"])
+        XCTAssertNil(fix(english, before: "l'hpmme"), "other languages never split a word at its apostrophe")
+    }
+
     /// French and English on one keyboard (Apple's "Français et English"): a word of either is
     /// never "corrected" into the other, a typo only one can fix gets its fix, and when both
     /// can, the language of the words before wins, else the keyboard's own.
@@ -895,6 +981,33 @@ final class AutocorrectEngineTests: XCTestCase {
         XCTAssertNil(revised("Im", next: "Haus"), "German \"Im Haus\" stays")
         XCTAssertEqual(revised("Im", next: "going"), "I'm")
         XCTAssertEqual(fix(english, before: "we said that im"), "I'm")
+    }
+
+    /// TestFlight build 56 (English and Portuguese): Apple's keyboard puts "nao sei" right once
+    /// "sei" says it was Portuguese. A word only one language knows as typed ("voce" is an
+    /// English word) takes the other's accents once the next word leans that one; never a
+    /// guess that changes its letters, nor when the words before lean the other way.
+    func testTheNextWordGivesTheWordBeforeItsLanguagesAccents() {
+        let available = ["en_US", "pt_BR"]
+        let english = stubbed { $0.valid = ["voce", "ate", "so", "we", "i", "lunch", "logo"] }
+        english.setLanguage(.english, available: available)
+        let portuguese = StubChecker()
+        portuguese.valid = ["você", "esta", "até", "amanhã", "só", "logo", "eu"]
+        portuguese.guessTable = ["voce": ["voe", "você"], "ate": ["até", "ata"], "so": ["só", "sol"], "we": ["wi"]]
+        english.setPartner(.portuguese, available: available, checker: portuguese)
+
+        func revised(_ word: String, before: String? = nil, next: String) -> String? {
+            english.revision(of: word, before: before ?? word, next: next, field: .text, autocorrectionType: .default)
+        }
+        XCTAssertEqual(revised("voce", next: "esta"), "você")
+        XCTAssertEqual(english.lastRevisionLanguage, .portuguese, "the fix is Portuguese's")
+        XCTAssertEqual(revised("Voce", next: "esta"), "Você")
+        XCTAssertEqual(revised("ate", next: "amanhã"), "até")
+        XCTAssertNil(revised("ate", next: "lunch"), "an English word after it")
+        XCTAssertNil(revised("ate", next: "logo"), "a word both know tells nothing")
+        XCTAssertNil(revised("so", before: "we ate lunch so", next: "esta"), "English words before it")
+        XCTAssertNil(revised("we", next: "esta"), "only a respelling with accents")
+        XCTAssertNil(revised("lunch", next: "esta"), "no guess of Portuguese's")
     }
 
     /// How often one language's keyboard changes the other's words, against iOS's own
@@ -1018,6 +1131,36 @@ final class AutocorrectEngineTests: XCTestCase {
         XCTAssertEqual(strip(engine, "myem helli"), ["helli", "hello", "hell"])
         XCTAssertEqual(strip(engine, "so bel"), ["bel", "belt", "bell"], "a contact Bell, offered as the word")
         XCTAssertEqual(strip(engine, "so Bel"), ["Bel", "Belt", "Bell"])
+    }
+
+    /// TestFlight (build 56, iPhone 17 Pro): "Getting random words capitalized", with
+    /// "Testing how this World" swiped and "Works" in the strip. Your own words that are also
+    /// common words (a Contacts name or a text replacement whose phrase is its shortcut, a fix
+    /// learned at a sentence's start) stay lowercase mid-sentence with Auto-capitalization off
+    /// too, while a name the dictionary knows only capitalised, a text replacement's phrase and
+    /// a word in your vocabulary keep the capitals you gave them (#2205).
+    func testYourCommonWordsStayLowercaseAndYourVocabularyKeepsItsCapitals() {
+        let engine = stubbed {
+            $0.valid = ["world", "works", "will", "swift", "thanks"]
+            $0.capitalised = ["Kate"]
+        }
+        engine.loadLexiconEntries([("World", "World"), ("Will", "Will"), ("Kate", "Kate"), ("thx", "Thanks")])
+        engine.applyLearning(TypingLearning(typos: ["wrks": "Works"], rejected: []))
+        engine.setVocabulary(["Swift"])
+        for addsCapitals in [true, false] {
+            engine.addsCapitals = addsCapitals
+            let mode = addsCapitals ? "on" : "off"
+            XCTAssertFalse(engine.isOwnSpelling("World"), "a common word, \(mode)")
+            XCTAssertFalse(engine.isOwnSpelling("Works"), "a fix learned capitalised, \(mode)")
+            XCTAssertTrue(engine.isOwnSpelling("Kate"), "a name, \(mode)")
+            XCTAssertTrue(engine.isOwnSpelling("Thanks"), "a text replacement's phrase, \(mode)")
+            XCTAssertTrue(engine.isOwnSpelling("Swift"), "your vocabulary's spelling, \(mode)")
+            XCTAssertEqual(engine.withoutStrayCapital("Swift", typed: ""), "Swift", mode)
+            XCTAssertEqual(strip(engine, "so wor"), ["wor", "world"], mode)
+            XCTAssertEqual(strip(engine, "so thx"), ["thx", "Thanks"], mode)
+            XCTAssertEqual(fix(engine, "so wrks"), "works", mode)
+            XCTAssertEqual(fix(engine, "so swift"), "Swift", mode)
+        }
     }
 
     func testNamesComeLastUnlessYouTypedACapital() {
@@ -1192,6 +1335,38 @@ final class AutocorrectEngineTests: XCTestCase {
     /// Without it the Deutsch layout keeps the dictionary engine exactly as before: no word
     /// list either, so no letter odds, no model completions in the strip, and no partner model.
     /// English and Spanish never wait on the experiment.
+    /// French's own word list (`fr.valid`) is read in place and, beside its model, says what is a
+    /// word instead of the phone's dictionary: a real word outside the model counts, letters that
+    /// are no word don't even where iOS's dictionary takes any letters, and a missing system
+    /// dictionary doesn't switch the model off.
+    func testFrenchReadsItsOwnWordList() throws {
+        let list = try XCTUnwrap(HexWordList.bundled("fr"), "fr.valid is bundled")
+        XCTAssertTrue(list.contains("abaissait"))
+        XCTAssertFalse(list.contains("qzxjvkq"))
+        XCTAssertFalse(list.contains(""))
+        let model = try XCTUnwrap(TypingDecoderModel.bundled("fr"))
+        let checker = SystemTextChecker()
+        let autocorrect = AutocorrectEngine(checker: checker, learnedWords: LearnedWordsStore(defaults: defaults))
+        autocorrect.setLanguage(.french, available: [])
+        XCTAssertFalse(autocorrect.hasWords, "no dictionary and no model")
+        autocorrect.decoder = TypingDecoder(model: model)
+        XCTAssertTrue(autocorrect.hasWords, "the model needs no system dictionary")
+        XCTAssertNotNil(checker.ownWords)
+        for word in ["maison", "Maison", "c'est", "c\u{2019}est", "abaissait"] {
+            XCTAssertTrue(checker.isWordValid(word), word)
+        }
+        XCTAssertFalse(checker.isWordValid("qzxjvkq"), "only Hex's words count")
+        // fr.capitals, read in place too: a name the books nearly always capitalise is no word
+        // typed lowercase, and is one with its capital.
+        XCTAssertEqual(HexWordList.bundled("fr", "capitals")?.value(of: "paris"), 100)
+        XCTAssertFalse(checker.isWordValid("paris"))
+        XCTAssertTrue(checker.isWordValid("Paris"))
+        XCTAssertTrue(checker.isWordValid("marie"), "94%: also an ordinary word")
+        XCTAssertEqual(checker.guesses(for: "maisn"), [], "no English guesses for French words")
+        autocorrect.decoder = TypingDecoder(model: try XCTUnwrap(TypingDecoderModel.bundled("en")))
+        XCTAssertNil(checker.ownWords, "English ships no list")
+    }
+
     func testTheGermanTypingModelNeedsItsExperiment() {
         let settings = FullKeyboardSettings(defaults: defaults)
         XCTAssertFalse(settings.germanSpatialAutocorrect, "off by default")
@@ -1207,6 +1382,19 @@ final class AutocorrectEngineTests: XCTestCase {
         settings.spatialAutocorrect = true
         XCTAssertEqual(settings.typingModel(for: .english)?.language, "en")
         XCTAssertEqual(settings.typingModel(for: .spanish)?.language, "es")
+    }
+
+    /// French (France) reads taps with Android's French model (`fr.hextm`): the held-out gate's
+    /// critical cases (an accent left out goes back where the plain spelling is no word; "a"
+    /// typed right stays) and a slip on AZERTY's bottom row. Canada's and Switzerland's French
+    /// have no model of their own yet.
+    func testSpatialAutocorrectReadsFrenchWithItsModel() throws {
+        let settings = FullKeyboardSettings(defaults: defaults)
+        XCTAssertEqual(settings.typingModel(for: .french)?.language, "fr")
+        XCTAssertNil(settings.typingModel(for: .frenchCanadian), "no fr-CA model yet")
+        try useDecoder(.french)
+        for word in ["le", "cafe", "il", "a", "faim", "merxi", "vers", "paris"] { typeTaps(word) }
+        XCTAssertEqual(target.text, "le café il a faim merci vers Paris ", "a name takes its capital from fr.capitals")
     }
 
     func testSpatialAutocorrectAddsSpanishAccents() throws {
@@ -1271,6 +1459,49 @@ final class AutocorrectEngineTests: XCTestCase {
         typeTaps("zorbiz")
         typeTaps("zorbix")
         XCTAssertEqual(target.text, "Zorbix zorbix ", "a slip in a name from Contacts, and the name typed right")
+    }
+
+    /// X: "it refuses to capitalize I's in sentences". "i", "im", "ill", "ive" and "id" took
+    /// their capital on space, but "i'm", "i'll", "i've" and "i'd" typed with the apostrophe
+    /// stayed lowercase, with smart quotes too (their ’ ends a token). Auto-capitalization off
+    /// adds no capital, as for "i".
+    func testPronounContractionsTypedWithTheirApostropheTakeTheirCapital() {
+        func type(_ text: String) {
+            for ch in text {
+                if ch == "'" {
+                    tap(.layerSwitch(.numbers))
+                    tap(.character("'"))
+                    if engine.layout.layer != .letters { tap(.layerSwitch(.letters)) }
+                } else {
+                    typeWord(String(ch))
+                }
+            }
+        }
+        type("so i'm in and i'd go ")
+        target.smartQuotesType = .default
+        type("i'll say i've ")
+        engine.autoCapitalizes = false
+        type("i'm ")
+        XCTAssertEqual(target.text, "so I'm in and I'd go I\u{2019}ll say I\u{2019}ve i\u{2019}m ")
+    }
+
+    /// Record typing logs: a word of someone's own in capitals ("DONT", from Contacts or one Hex
+    /// learned) was read for a lowercase slip and put in by space. The strip offers it; space
+    /// puts in the next reading that clears the margin ("don't") or leaves what was typed.
+    /// Names and your vocabulary's spellings are as before.
+    func testSpatialAutocorrectOffersYourWordsInCapitalsWithoutPuttingThemIn() throws {
+        try useDecoder()
+        engine.autocorrect.loadLexiconEntries([("DONT", "DONT"), ("ZORBIX", "ZORBIX"), ("Quorvent", "Quorvent")])
+        for letter in "dpnt" { tapCentre(letter) }
+        XCTAssertTrue(engine.suggestions.contains { $0.replacement == "DONT" }, "offered in the strip")
+        tap(.space)
+        for word in ["zorbiz", "quorvemt"] { typeTaps(word) }
+        XCTAssertEqual(target.text, "don't zorbiz Quorvent ")
+        let autocorrect = engine.autocorrect
+        XCTAssertTrue(autocorrect.isOwnCapitals("McQuorv", typed: "mcquorc"), "capitals inside")
+        XCTAssertFalse(autocorrect.isOwnCapitals("DONT", typed: "DPNT"), "typed in capitals")
+        autocorrect.setVocabulary(["GitHub"])
+        XCTAssertFalse(autocorrect.isOwnCapitals("GitHub", typed: "githib"), "your vocabulary's spelling")
     }
 
     /// "th", then the e aimed high 80 ms later, landing on the strip's lower half under its
@@ -1358,6 +1589,115 @@ final class AutocorrectEngineTests: XCTestCase {
         edgeSpace(under: "b")
         typeTaps("didnt")
         XCTAssertTrue(target.text.hasSuffix(" I didn't "), target.text)
+    }
+
+    /// A missed space with a slip in the second word, when the whole run is no word and no
+    /// dictionary's: the fallback reads the rest alone ("specialchsracter" -> "special
+    /// character").
+    func testAMissedSpaceWithASlipInTheSecondWordStillSplits() throws {
+        try useDecoder()
+        for (typed, fixed) in [
+            ("specialchsracter", "special character "),
+            ("goodmotning", "good morning "),
+            ("nextwerk", "next week "),
+            ("lookingforwsrd", "looking forward "),
+            ("emailaddtess", "email address "),
+        ] {
+            typeTaps(typed)
+            XCTAssertEqual(target.text, fixed, typed)
+            while target.hasText { target.deleteBackward() }
+            engine.configureForField()
+        }
+    }
+
+    /// Three or more words typed with no spaces are read as words, every one spelled as
+    /// typed ("seeyoutomorrow").
+    func testWordsTypedWithNoSpacesAreReadAsWords() throws {
+        try useDecoder()
+        for (typed, fixed) in [
+            ("seeyoutomorrow", "see you tomorrow "),
+            ("thankyouverymuch", "thank you very much "),
+            ("haveaniceday", "have a nice day "),
+            ("inthemorning", "in the morning "),
+        ] {
+            typeTaps(typed)
+            XCTAssertEqual(target.text, fixed, typed)
+            while target.hasText { target.deleteBackward() }
+            engine.configureForField()
+        }
+    }
+
+    /// The fallback never turns a word the decoder already reads as one back into two
+    /// ("understsnd" -> "understand").
+    func testAOneWordTypoStaysOneWord() throws {
+        try useDecoder()
+        for (typed, fixed) in [("understsnd", "understand "), ("informstion", "information ")] {
+            typeTaps(typed)
+            XCTAssertEqual(target.text, fixed, typed)
+            while target.hasText { target.deleteBackward() }
+            engine.configureForField()
+        }
+    }
+
+    /// A run the dictionary knows is never split by the fallback, even when its words alone
+    /// cost less than the valid literal would: "in the morning" costs 20.5 without its
+    /// spaces, under the 22.5 a valid unknown word costs, so only the guard keeps
+    /// "inthemorning" as typed.
+    func testTheFallbackNeverSplitsAWordTheDictionaryAccepts() throws {
+        let checker = StubChecker()
+        checker.valid = ["inthemorning"]
+        target = FixtureTextTarget()
+        target.autocapitalizationType = UITextAutocapitalizationType.none
+        engine = FullKeyboardEngine(
+            target: target,
+            autocorrect: AutocorrectEngine(checker: checker, learnedWords: LearnedWordsStore(defaults: defaults))
+        )
+        engine.width = 393
+        engine.clock = { [unowned self] in self.now }
+        engine.configureForField()
+        try useDecoder()
+        typeTaps("inthemorning")
+        XCTAssertEqual(target.text, "inthemorning ")
+    }
+
+    /// A one-word typo is not read as a word and a rare one ("tommorow" as "tom morrow"):
+    /// without the missed spaces the two words are less likely than the run, so the fallback
+    /// declines. The keyboard's deterministic fix still puts "tomorrow" in.
+    func testTheFallbackDoesNotSplitAOneWordTypo() throws {
+        try useDecoder()
+        let decoder = try XCTUnwrap(engine.autocorrect.decoder)
+        let keys = try XCTUnwrap(TypingDecoder.Keys(layout: engine.layout))
+        let taps = try "tommorow".map { try XCTUnwrap(keys.centres[$0]) }
+        let decision = try XCTUnwrap(
+            decoder.decide(taps: taps, typed: "tommorow", previous: nil, literalIsValid: false, keys: keys)
+        )
+        XCTAssertNil(decision.replacement)
+        XCTAssertFalse(decision.readings.contains { $0.text == "tom morrow" })
+        typeTaps("tommorow")
+        XCTAssertFalse(target.text.contains("tom morrow"))
+        XCTAssertEqual(target.text, "tomorrow ")
+    }
+
+    /// A reading that only missed the margin still says what the taps read: the fallback
+    /// ("the her on") may not overrule the likelier "the heron" just because it failed by
+    /// less than the margin.
+    func testTheFallbackDoesNotOverruleALikelierReading() throws {
+        try useDecoder()
+        let decoder = try XCTUnwrap(engine.autocorrect.decoder)
+        let keys = try XCTUnwrap(TypingDecoder.Keys(layout: engine.layout))
+        let taps = try "theheron".map { try XCTUnwrap(keys.centres[$0]) }
+        let decision = try XCTUnwrap(
+            decoder.decide(taps: taps, typed: "theheron", previous: nil, literalIsValid: false, keys: keys)
+        )
+        XCTAssertNil(decision.replacement)
+        XCTAssertEqual(decision.readings.first?.text, "the heron")
+        XCTAssertFalse(decision.readings.contains { $0.text == "the her on" })
+    }
+
+    /// The strip offers a fallback reading before space puts it in.
+    func testTheStripOffersTheFallbackReading() throws {
+        try useDecoder()
+        XCTAssertTrue(stripAfterTaps("specialchsracter").contains("special character"))
     }
 
     func testSpatialAutocorrectReadsAnETappedHighOnTheStripAsThe() throws {

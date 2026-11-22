@@ -35,7 +35,7 @@ extension FullKeyboardView {
         if let library = emojiLibrary, library.language == language || !EmojiLibrary.languages.contains(language) {
             return library
         }
-        emojiLibrary = EmojiLibrary.load(language: language, bundle: Bundle(for: FullKeyboardView.self))
+        emojiLibrary = EmojiLibrary.bundled(language: language, bundle: Bundle(for: FullKeyboardView.self))
         return emojiLibrary
     }
 
@@ -53,6 +53,7 @@ extension FullKeyboardView {
         guard emojiPanel == nil, !showsRecording else { return }
         let started = CACurrentMediaTime()
         guard let library = loadEmojiLibrary() else { return }
+        engine.commitHangulComposition()
         typingLog?.ui("emoji_open")
         dismissStyleMenu()
         plane.cancelAllTouches()
@@ -103,6 +104,8 @@ extension FullKeyboardView {
     }
 
     func insertEmoji(_ text: String, entry: Int, source: String) {
+        // An emoji ends a Hangul run, whether the keys search emoji first or not.
+        engine.commitHangulComposition()
         if routedTarget.isSearching {
             // The keys type into the search; the emoji goes into the field.
             suspendedTypingLog?.edit("insert", [
@@ -210,9 +213,19 @@ extension FullKeyboardView {
             panel.frame = routedTarget.isSearching ? content : bounds
             panel.metrics = m
             panel.horizontalInset = layout.horizontalInset
+            // The panel covers the keyboard while it shows, so the emoji key's keycap sits in
+            // it at the plane's frame (the lift is zero then); the ABC experiment puts the
+            // panel's ABC under it. Searching lifts the panel and hides it, and shows ABC
+            // nowhere, so there is no key to sit under.
+            let underEmojiKey = emojiLettersUnderEmojiKeyOverride ?? FullKeyboardSettings().emojiLettersUnderEmojiKey
+            panel.emojiKeyFrame = underEmojiKey && !routedTarget.isSearching
+                ? layout.key(.emoji)?.frame.offsetBy(dx: 0, dy: lift)
+                : nil
         }
         let inset = layout.horizontalInset
-        emojiSearchField?.frame = CGRect(x: inset, y: m.stripTop + lift, width: bounds.width - 2 * inset, height: m.stripHeight)
+        // Centred on the strip's words' line, as the emoji panel's top row.
+        let band = m.stripLineBand
+        emojiSearchField?.frame = CGRect(x: inset, y: m.stripTop + lift + band.top, width: bounds.width - 2 * inset, height: band.height)
         emojiResults?.frame = CGRect(x: inset + m.side, y: 0, width: bounds.width - 2 * (inset + m.side), height: lift)
     }
 

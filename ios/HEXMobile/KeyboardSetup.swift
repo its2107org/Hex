@@ -60,6 +60,10 @@ final class KeyboardSetupMonitor {
                 keyboardAdded = true
                 fullAccess = .unconfirmed
                 microphone = .undetermined
+            case _ where args[idx + 1].contains("-noaccess"):
+                keyboardAdded = true
+                fullAccess = .off
+                microphone = .granted
             case "onboarding-tour":
                 let elapsed = OnboardingFixture.Tour.elapsed
                 keyboardAdded = elapsed >= OnboardingFixture.Tour.keyboardAdded
@@ -227,7 +231,7 @@ struct SetupSheet: View {
     private var fullAccessNote: String? {
         guard needsKeyboardCheck else { return nil }
         return monitor.fullAccess == .off
-            ? String(localized: "Turn on Allow Full Access in Settings.")
+            ? String(localized: "Turn on Allow Full Access in Settings for dictation, haptics and copy and paste in the keyboard.")
             : String(localized: "Switch to Hex below to confirm.")
     }
 
@@ -285,7 +289,15 @@ struct SetupSheet: View {
                     title: "Speech model",
                     status: modelStatus,
                     icon: modelReady ? .done : .todo
-                )
+                ) {
+                    // A check or download that ended is never the last word: try it again here.
+                    if modelFailed {
+                        smallButton("Try again") {
+                            keyboardSpeech.start(retry: true) { dictation.engineName }
+                            if case .failed = dictation.phase { dictation.prepareModel() }
+                        }
+                    }
+                }
             }
             .background(
                 HexTheme.bgBase,
@@ -358,6 +370,12 @@ struct SetupSheet: View {
         }
     }
 
+    private var modelFailed: Bool {
+        if case .failed = keyboardSpeech.state { return true }
+        if case .failed = dictation.phase { return !dictation.isModelReady }
+        return false
+    }
+
     private var modelStatus: String {
         if dictation.isModelReady && !keyboardSpeech.isReady {
             switch keyboardSpeech.state {
@@ -367,14 +385,11 @@ struct SetupSheet: View {
             }
         }
         if dictation.isModelReady {
-            // "Norwegian Bokmål · Apple": the language it really transcribes, short enough
-            // for the row.
+            // "Norwegian Bokmål": the language it really transcribes, never the engine.
             let code = Locale(identifier: dictation.transcriptionLanguageID).language.languageCode?.identifier ?? "en"
-            let language = Locale.current.localizedString(forLanguageCode: code).map {
+            return Locale.current.localizedString(forLanguageCode: code).map {
                 $0.prefix(1).uppercased() + $0.dropFirst()
             } ?? dictation.transcriptionLanguage
-            let engine = dictation.engineName == "Apple Speech" ? "Apple" : dictation.engineName
-            return "\(language) · \(engine)"
         }
         switch dictation.phase {
         case .preparingModel:
