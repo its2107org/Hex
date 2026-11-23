@@ -1,11 +1,13 @@
 import Combine
+import os
 import UIKit
 
 /// The words so far in place of the full keyboard's keys while it records (Settings ›
 /// Dictation › Show what I say): the keys go and the words have their space, the settled
 /// words in the keys' ink and the tentative tail muted, the newest line always in view with
 /// whole lines above it. It takes every touch where the keys were, so nothing types while it
-/// shows; the recording bar above and the globe stay as they are.
+/// shows, and a tap on it finishes the dictation as Done does; the recording bar above and the
+/// globe stay as they are.
 @MainActor
 final class LiveDictationPreviewView: UIView {
     var palette = FullKeyboardPalette(isDark: false) { didSet { if palette != oldValue { render() } } }
@@ -24,30 +26,40 @@ final class LiveDictationPreviewView: UIView {
     }
     var globeRadius: CGFloat = FullKeyboardPalette.cornerRadius { didSet { globe.cornerRadius = globeRadius } }
     private(set) var transcript = LiveTranscript()
-    /// The words' box, and the words in it: one label, as tall as the text it shows, moved up
-    /// by whole lines once that's taller than the box.
-    private let box = UIView()
-    private let label = UILabel()
+    /// The words, drawn by one view (`LiveWordsView`), which also moves them.
+    let words = LiveWordsView()
     private let globe = GlobeKeycapView()
+    /// Finishes the dictation as Done does, once: a tap on the words, or VoiceOver's activate
+    /// or Finish dictation action on them.
+    var onFinish: (() -> Void)?
+    /// When the words appeared, on the touches' clock.
+    var shownAt = ProcessInfo.processInfo.systemUptime
+    private var down: (point: CGPoint, time: TimeInterval)?
+    private var finished = false
 
     static let placeholder = String(localized: "Listening…")
+    /// A touch that lands this soon after the words appear is the end of the tap that started
+    /// the dictation or a thumb settling where the keys were, not a tap on the words: the swap's
+    /// longer half (the words coming in) and a tenth of a second more.
+    static let settle: TimeInterval = LiveDictationPreviewHost.Motion.wordsIn + 0.1
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
         isOpaque = false
-        box.clipsToBounds = true
-        box.isUserInteractionEnabled = false
-        label.numberOfLines = 0
-        label.isAccessibilityElement = false
-        box.addSubview(label)
-        addSubview(box)
+        words.placeholder = Self.placeholder
+        addSubview(words)
         globe.isHidden = true
         globe.isUserInteractionEnabled = false
         addSubview(globe)
         // One element for VoiceOver, read when it's focused, never announced as words change.
         isAccessibilityElement = true
         accessibilityTraits = .staticText
+        accessibilityCustomActions = [
+            UIAccessibilityCustomAction(name: String(localized: "Finish dictation")) { [weak self] _ in
+                MainActor.assumeIsolated { self?.finish() ?? false }
+            },
+        ]
         render()
     }
 
@@ -57,16 +69,15 @@ final class LiveDictationPreviewView: UIView {
     func show(_ next: LiveTranscript) {
         guard next != transcript else { return }
         transcript = next
-        render()
+        accessibilityLabel = next.isEmpty ? Self.placeholder : next.text
+        words.show(text: next.text, settled: next.settled.count)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        let frame = bounds.inset(by: textInsets)
-        if box.frame != frame {
-            box.frame = frame
-            placeWords()
-        }
+        // The words' box, with the band above it where a line leaving the top fades out.
+        let box = bounds.inset(by: textInsets)
+        words.frame = CGRect(x: box.minX, y: box.minY - LiveWordsView.edge, width: box.width, height: box.height + LiveWordsView.edge)
     }
 
     /// A touch anywhere on it stays with it.
@@ -74,70 +85,62 @@ final class LiveDictationPreviewView: UIView {
         bounds.contains(point)
     }
 
-    private var font: UIFont {
-        .systemFont(ofSize: orientation == .landscape ? 19 : 23, weight: .regular)
+    /// Only a tap finishes, by the keys' own measures: a touch that moves further than a key's
+    /// slop or is held as long as a key takes to open its accents does nothing, so a thumb
+    /// resting or sliding where the keys were never ends a dictation.
+    func touchDown(at point: CGPoint, time: TimeInterval) {
+        down = time - shownAt >= Self.settle ? (point, time) : nil
+    }
+
+    func touchMoved(to point: CGPoint) {
+        guard let down, hypot(point.x - down.point.x, point.y - down.point.y) > FullKeyboardEngine.accentSlop else { return }
+        self.down = nil
+    }
+
+    func touchUp(at point: CGPoint, time: TimeInterval) {
+        defer { down = nil }
+        guard let down, time - down.time < FullKeyboardEngine.accentHoldDelay,
+              hypot(point.x - down.point.x, point.y - down.point.y) <= FullKeyboardEngine.accentSlop else { return }
+        finish()
+    }
+
+    @discardableResult
+    private func finish() -> Bool {
+        guard !finished, let onFinish else { return false }
+        finished = true
+        onFinish()
+        return true
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        touchDown(at: touch.location(in: self), time: touch.timestamp)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        touchMoved(to: touch.location(in: self))
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let touch = touches.first else { return }
+        touchUp(at: touch.location(in: self), time: touch.timestamp)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        down = nil
+    }
+
+    override func accessibilityActivate() -> Bool {
+        finish()
     }
 
     private func render() {
         globe.palette = palette
         globe.isLandscape = orientation == .landscape
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.minimumLineHeight = lineHeight
-        paragraph.maximumLineHeight = lineHeight
-        paragraph.lineBreakMode = .byWordWrapping
-        let base: [NSAttributedString.Key: Any] = [.font: font, .paragraphStyle: paragraph]
-        let text = NSMutableAttributedString()
-        if transcript.isEmpty {
-            text.append(NSAttributedString(string: Self.placeholder, attributes: base.merging([.foregroundColor: palette.textMuted]) { $1 }))
-            accessibilityLabel = Self.placeholder
-        } else {
-            let shown = Self.tail(of: transcript, characters: shownCharacters)
-            text.append(NSAttributedString(string: shown.settled, attributes: base.merging([.foregroundColor: palette.textBase]) { $1 }))
-            text.append(NSAttributedString(string: shown.tentative, attributes: base.merging([.foregroundColor: palette.textMuted]) { $1 }))
-            accessibilityLabel = transcript.text
-        }
-        label.attributedText = text
-        placeWords()
-    }
-
-    /// About as many characters as fill the box and three lines more: a minute's text laid out
-    /// whole in a scrolling text view held 27 MB more in the keyboard (iPhone 17 Pro).
-    private var shownCharacters: Int {
-        let lines = max(1, box.bounds.height / lineHeight) + 3
-        let perLine = max(10, box.bounds.width / (font.pointSize * 0.42))
-        return max(200, Int(lines * perLine))
-    }
-
-    /// The end of `transcript` in at most `characters`, from a word's start: its settled part,
-    /// then its tentative tail as it follows them.
-    static func tail(of transcript: LiveTranscript, characters: Int) -> (settled: String, tentative: String) {
-        let settled = transcript.settled
-        let tentative = transcript.tentativeJoined
-        let total = settled.count + tentative.count
-        guard total > characters else { return (settled, tentative) }
-        let full = settled + tentative
-        var start = full.index(full.startIndex, offsetBy: total - characters)
-        // From a word's start, so no word shows cut.
-        if !full[full.index(before: start)].isWhitespace, let space = full[start...].firstIndex(where: \.isWhitespace) {
-            start = full[space...].firstIndex(where: { !$0.isWhitespace }) ?? start
-        }
-        let dropped = full.distance(from: full.startIndex, to: start)
-        if dropped >= settled.count {
-            return ("", String(full[start...]))
-        }
-        return (String(settled.dropFirst(dropped)), tentative)
-    }
-
-    private var lineHeight: CGFloat { (font.lineHeight * 1.08).rounded(.up) }
-
-    /// The newest line at the box's foot once the words overflow it, with whole lines above.
-    private func placeWords() {
-        let width = box.bounds.width
-        guard width > 0 else { return }
-        let height = label.sizeThatFits(CGSize(width: width, height: .greatestFiniteMagnitude)).height.rounded(.up)
-        let overflow = height - box.bounds.height
-        let y = overflow > 0 ? -(overflow / lineHeight).rounded(.up) * lineHeight : 0
-        label.frame = CGRect(x: 0, y: y, width: width, height: height)
+        words.palette = palette
+        words.font = .systemFont(ofSize: orientation == .landscape ? 19 : 23, weight: .regular)
+        accessibilityLabel = transcript.isEmpty ? Self.placeholder : transcript.text
     }
 }
 
@@ -177,7 +180,18 @@ final class LiveDictationPreviewHost {
     private weak var keyboard: FullKeyboardView?
     private var preview: LiveDictationPreviewView?
     private var subscription: AnyCancellable?
-    static let fade: TimeInterval = 0.18
+
+    /// The keys out and the words in as recording starts, and back as the dictation goes in, in
+    /// one change each, never waiting for the other half: springs with no bounce. The words
+    /// settle from a few points below as they come, and drift a few points up, toward the field
+    /// their text goes into, as they go. With Reduce Motion, fades only.
+    enum Motion {
+        static let keysOut: TimeInterval = 0.2
+        static let wordsIn: TimeInterval = 0.3
+        static let wordsOut: TimeInterval = 0.15
+        static let keysIn: TimeInterval = 0.3
+        static let travel: CGFloat = 6
+    }
 
     func attach(to keyboard: FullKeyboardView) {
         self.keyboard = keyboard
@@ -198,7 +212,9 @@ final class LiveDictationPreviewHost {
     private func sync(_ transcript: LiveTranscript?) {
         guard let keyboard else { return }
         let live = keyboard.model.liveText
-        guard keyboard.showsRecording, live.showsPreview, let transcript else {
+        let phase = keyboard.model.stagePhase
+        let isListening = phase == .recording || phase == .transcribing
+        guard keyboard.showsRecording, isListening, live.showsPreview, let transcript else {
             hide()
             return
         }
@@ -209,28 +225,65 @@ final class LiveDictationPreviewHost {
     private func show(in keyboard: FullKeyboardView) -> LiveDictationPreviewView {
         let preview = LiveDictationPreviewView()
         preview.palette = keyboard.palette
-        preview.alpha = 0
+        preview.onFinish = { [weak keyboard] in
+            keyboard?.typingLog?.ui("dictation_stop", [TypingLogField("from", .string("live_preview"))])
+            keyboard?.model.onStopTap?()
+        }
         keyboard.insertSubview(preview, aboveSubview: keyboard.plane)
         self.preview = preview
         layout()
-        let duration = keyboard.window == nil ? 0 : Self.fade
-        UIView.animate(withDuration: duration, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
+        guard keyboard.window != nil else {
+            keyboard.plane.alpha = 0
+            return preview
+        }
+        let moves = !UIAccessibility.isReduceMotionEnabled
+        preview.alpha = 0
+        preview.transform = moves ? CGAffineTransform(translationX: 0, y: Motion.travel) : .identity
+        Self.spring(moves ? Motion.wordsIn : 0.2) {
             preview.alpha = 1
+            preview.transform = .identity
+        }
+        Self.spring(moves ? Motion.keysOut : 0.2) {
             keyboard.plane.alpha = 0
         }
         return preview
     }
 
+    /// The keys take touches again at once: the words stop taking them as they start to go.
     private func hide() {
         guard let preview, let keyboard else { return }
         self.preview = nil
-        let duration = keyboard.window == nil ? 0 : Self.fade
-        UIView.animate(withDuration: duration, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction]) {
-            preview.alpha = 0
+        preview.isUserInteractionEnabled = false
+        let cost = preview.words.takeCost()
+        if cost.updates > 0 {
+            Self.log.notice("live: preview drew \(cost.updates, privacy: .public) updates, \(String(format: "%.2f", cost.averageMS), privacy: .public) ms on average, \(String(format: "%.2f", cost.slowestMS), privacy: .public) at most")
+        }
+        guard keyboard.window != nil else {
             keyboard.plane.alpha = 1
-        } completion: { _ in
+            preview.removeFromSuperview()
+            return
+        }
+        let moves = !UIAccessibility.isReduceMotionEnabled
+        Self.spring(moves ? Motion.wordsOut : 0.2) {
+            preview.alpha = 0
+            if moves { preview.transform = CGAffineTransform(translationX: 0, y: -Motion.travel) }
+        } completion: {
             preview.removeFromSuperview()
         }
+        Self.spring(moves ? Motion.keysIn : 0.2) {
+            keyboard.plane.alpha = 1
+        }
+    }
+
+    private static let log = Logger(subsystem: "anomaly.hex.mobile.keyboard", category: "capture-probe")
+
+    private static func spring(_ duration: TimeInterval, _ changes: @escaping () -> Void, completion: (() -> Void)? = nil) {
+        UIView.animate(
+            springDuration: duration, bounce: 0, initialSpringVelocity: 0, delay: 0,
+            options: [.beginFromCurrentState, .allowUserInteraction],
+            animations: changes,
+            completion: { _ in completion?() }
+        )
     }
 
     /// Where the keys were, under the recording bar to the keyboard's bottom.

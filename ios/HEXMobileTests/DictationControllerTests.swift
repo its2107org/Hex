@@ -88,7 +88,7 @@ private final class FakeAudioManager: AudioManaging {
 
 /// A preparation that never answers, as Speech or its asset store not answering.
 private actor SilentTranscriber: LocalTranscribing {
-    nonisolated let displayName = "Apple Speech"
+    nonisolated let engine: DictationEngine = .appleSpeech
     let languageName = "English"
     private(set) var preparationCancelled = false
 
@@ -105,6 +105,7 @@ private actor SilentTranscriber: LocalTranscribing {
 }
 
 private actor ControlledTranscriber: LocalTranscribing {
+    nonisolated let engine: DictationEngine = .appleSpeech
     nonisolated let displayName = "Controlled Speech"
     let languageName = "English"
 
@@ -169,7 +170,7 @@ private actor ControlledTranscriber: LocalTranscribing {
 
 /// A transcriber whose model can't be got ready, such as a language Apple Speech can't install.
 private actor UnpreparableTranscriber: LocalTranscribing {
-    nonisolated let displayName = "Apple Speech"
+    nonisolated let engine: DictationEngine = .appleSpeech
     let languageName = "Russian"
     let error: Error
 
@@ -1814,15 +1815,36 @@ final class DictationControllerTests: XCTestCase {
             KeyboardParakeetBudget.allowsLoad(footprint: 120 * mb, available: 50 * mb),
             "too little left, whatever the limit"
         )
-        XCTAssertTrue(KeyboardParakeetBudget.allowsTranscription(footprint: 60 * mb, available: 117 * mb))
+        XCTAssertTrue(KeyboardParakeetBudget.allowsTranscription(footprint: 60 * mb, available: 117 * mb, audioSeconds: 10))
         XCTAssertTrue(
-            KeyboardParakeetBudget.allowsTranscription(footprint: 56 * mb, available: 121 * mb),
+            KeyboardParakeetBudget.allowsTranscription(footprint: 56 * mb, available: 121 * mb, audioSeconds: 9.4),
             "Hex's keyboard recording on the iPhone 17 Pro"
         )
-        XCTAssertFalse(KeyboardParakeetBudget.allowsTranscription(footprint: 160 * mb, available: 17 * mb))
+        XCTAssertFalse(KeyboardParakeetBudget.allowsTranscription(footprint: 160 * mb, available: 17 * mb, audioSeconds: 5))
         XCTAssertTrue(
             KeyboardParakeetBudget.allowsLoad(footprint: 20 * mb, available: 0),
             "no limit where iOS sets none (the simulator)"
+        )
+    }
+
+    func testALongDictationGoesToApplesEngineWhichStreamsIt() {
+        let mb = KeyboardParakeetBudget.megabyte
+        XCTAssertEqual(KeyboardParakeetBudget.transcribeHeadroom(audioSeconds: 60), 54 * mb, "24 MB and 0.5 MB a second")
+        // The iPhone 17 Pro's keyboard after many dictations: 91 MB of its 177 MB.
+        XCTAssertTrue(KeyboardParakeetBudget.allowsTranscription(footprint: 91 * mb, available: 86 * mb, audioSeconds: 60))
+        XCTAssertTrue(KeyboardParakeetBudget.allowsTranscription(footprint: 91 * mb, available: 86 * mb, audioSeconds: 90))
+        XCTAssertFalse(
+            KeyboardParakeetBudget.allowsTranscription(footprint: 91 * mb, available: 86 * mb, audioSeconds: 91),
+            "longer than 90 s goes to Apple's engine, whatever the room"
+        )
+        XCTAssertFalse(
+            KeyboardParakeetBudget.allowsTranscription(footprint: 91 * mb, available: 50 * mb, audioSeconds: 60),
+            "a keyboard with less room: 60 s needs 54 MB"
+        )
+        XCTAssertTrue(KeyboardParakeetBudget.allowsTranscription(footprint: 91 * mb, available: 50 * mb, audioSeconds: 40))
+        XCTAssertFalse(
+            KeyboardParakeetBudget.allowsTranscription(footprint: 20 * mb, available: 0, audioSeconds: 120),
+            "the cap holds where iOS sets no limit (the simulator)"
         )
     }
 
@@ -1849,6 +1871,40 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(hold(unmetered: nil), .notOnWiFi, "before the connection is known")
         XCTAssertEqual(hold(free: 1_500_000_000), .needsSpace)
         XCTAssertNil(hold(free: nil), "space iOS doesn't report doesn't hold it")
+    }
+
+    func testHomesSpeechModelCardShowsOnlyWhereTheKeyboardWouldUseItAndStaysDismissed() {
+        func shows(enabled: Bool = true, fits: Bool = true, hold: KeyboardParakeetDownload.Hold? = nil, dismissed: Bool = false) -> Bool {
+            SpeechModelHomeCard.shows(enabled: enabled, fits: fits, hold: hold, dismissed: dismissed)
+        }
+        XCTAssertTrue(shows(), "downloading, downloaded or ready")
+        XCTAssertTrue(shows(hold: .notOnWiFi), "waiting says why")
+        XCTAssertTrue(shows(hold: .keyboardNotMeasured))
+        XCTAssertTrue(shows(hold: .needsSpace))
+        XCTAssertFalse(shows(enabled: false), "the switch turned off")
+        XCTAssertFalse(shows(fits: false), "under 6 GB")
+        XCTAssertFalse(shows(hold: .notEnglish))
+        XCTAssertFalse(shows(hold: .otherEngine))
+        XCTAssertFalse(shows(hold: .keyboardTooSmall))
+        XCTAssertFalse(shows(dismissed: true))
+        let suite = "speech-model-card-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertFalse(SpeechModelHomeCard.isDismissed(defaults))
+        SpeechModelHomeCard.dismiss(defaults)
+        XCTAssertTrue(SpeechModelHomeCard.isDismissed(UserDefaults(suiteName: suite)!), "dismissed stays dismissed")
+    }
+
+    func testTheKeyboardsSpeechModelNeverDownloadsByItselfOverCellular() {
+        func unmetered(satisfied: Bool = true, expensive: Bool = false, constrained: Bool = false, cellular: Bool = false) -> Bool {
+            KeyboardParakeetDownload.isUnmetered(satisfied: satisfied, expensive: expensive, constrained: constrained, cellular: cellular)
+        }
+        XCTAssertTrue(unmetered(), "Wi-Fi, or a VPN over Wi-Fi")
+        XCTAssertFalse(unmetered(satisfied: false), "no connection")
+        XCTAssertFalse(unmetered(expensive: true), "a personal hotspot, or cellular as iOS usually prices it")
+        XCTAssertFalse(unmetered(constrained: true), "Low Data Mode")
+        XCTAssertFalse(unmetered(cellular: true), "5G that iOS calls not expensive under Allow More Data on 5G")
+        XCTAssertFalse(unmetered(expensive: true, cellular: true), "ordinary cellular")
     }
 
     func testParakeetsFilesMoveIntoTheAppGroupRatherThanDownloadingAgain() throws {
@@ -2065,7 +2121,7 @@ final class DictationControllerTests: XCTestCase {
         XCTAssertEqual(controller.phase, .ready)
 
         // Turned off while Parakeet Ultra dictated: Hex prepares the engine it picks without it.
-        controller.engineName = ParakeetUltraTranscriber.name
+        controller.engine = .parakeetUltra
         controller.multilingualParakeetChanged()
         try await settle()
         XCTAssertEqual(made, 2)
@@ -2233,7 +2289,7 @@ final class DictationControllerTests: XCTestCase {
 
         // A failed model with none ready still sets up.
         controller.isModelReady = false
-        controller.phase = .failed("The speech model isn't ready. Try again.")
+        controller.failModel("The speech model isn't ready. Try again.")
         XCTAssertTrue(controller.primaryActionPreparesModel)
     }
 
@@ -3300,6 +3356,15 @@ final class SpeechModelInstallTests: XCTestCase {
             XCTAssertEqual(UserFacingError.message(for: shown, context: .transcription), "Open Hex to download English.")
             XCTAssertTrue(settings.keyboardNeedsHex(), "the Hex key opens Hex, which downloads it")
         }
+        // Hebrew picked by hand on an English iPhone: the keyboard's install failing names
+        // English to try, but Hex set nothing aside, so Hex downloads Hebrew too.
+        let hebrew = SpeechModelUnavailable(language: "he-IL", reason: .notOnThisIPhone, fallback: "en-US", automatic: false)
+        settings.clearKeyboardNeedsHex()
+        let first = SpeechModelNeedsHex.keyboardError(for: hebrew, language: "he-IL", settings: settings)
+        XCTAssertEqual(UserFacingError.message(for: first, context: .transcription), "Hex couldn't transcribe that. Try again.")
+        let shown = SpeechModelNeedsHex.keyboardError(for: hebrew, language: "he-IL", settings: settings)
+        XCTAssertEqual(UserFacingError.message(for: shown, context: .transcription), "Open Hex to download Hebrew.")
+        XCTAssertTrue(settings.keyboardNeedsHex())
     }
 
     func testAKeyboardDictationThatWorksBetweenTwoFailuresKeepsTheKeyboardDictating() async throws {
@@ -3319,9 +3384,14 @@ final class SpeechModelInstallTests: XCTestCase {
         XCTAssertTrue(settings.noteKeyboardModelFailure(at: marked.addingTimeInterval(LanguageSettings.keyboardStrikeWindow + 60)))
     }
 
+    /// Only a language Hex itself set aside keeps the sentence naming another one to try.
     func testTheKeyboardKeepsAMoveToAnotherLanguageAndACancel() {
         let switched = SpeechModelUnavailable(language: "ru-RU", reason: .notOnThisIPhone, fallback: "en-US")
         let offer = SpeechModelUnavailable(language: "ru-RU", reason: .notOnThisIPhone, fallback: "en-US", automatic: false)
+        // Hex's own installs of Russian failed twice in a row.
+        settings.noteUnavailable("ru-RU")
+        settings.noteUnavailable("ru-RU")
+        XCTAssertTrue(settings.isUnavailable("ru-RU"))
         for error in [switched, offer] {
             let shown = SpeechModelNeedsHex.keyboardError(for: error, language: "ru-RU", settings: settings)
             XCTAssertEqual(shown as? SpeechModelUnavailable, error, "the next dictation works without Hex")
@@ -3494,8 +3564,11 @@ private final class FakeAudioSession: AudioSessionControlling {
         calls.append(.category(category, mode, options))
         self.category = category
         self.mode = mode
-        categoryOptions = options
-        allowsBluetooth = options.contains(.allowBluetoothHFP)
+        // iOS adds the active mode's implicit options: `.voiceChat` records
+        // Bluetooth hands-free itself, whether or not it was asked for.
+        let implicit: AVAudioSession.CategoryOptions = mode == .voiceChat ? [.allowBluetoothHFP] : []
+        categoryOptions = options.union(implicit)
+        allowsBluetooth = categoryOptions.contains(.allowBluetoothHFP)
     }
 
     func prefer(_ microphone: Microphone?) throws {
@@ -3528,6 +3601,49 @@ final class AudioSessionSetupTests: XCTestCase {
         XCTAssertEqual(categoryCalls.count, 1, "the keepalive's category serves the dictation")
         try audio.configureAudioSession(recordingFrom: .bluetooth)
         XCTAssertEqual(session.calls.filter { if case .category = $0 { true } else { false } }.count, 2)
+    }
+
+    /// Experiments › Voice isolation: on, Hex records in `.voiceChat` mode, whose voice
+    /// processing lets Control Center's Mic Mode offer Voice Isolation; off, `.measurement`
+    /// exactly as before. The options stay today's either way, and the category (with the
+    /// mode) is still set only when it changes, even though `.voiceChat` adds
+    /// `.allowBluetoothHFP` itself.
+    func testVoiceIsolationRecordsInVoiceChatModeAndOffKeepsMeasurement() throws {
+        let suite = "hex.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = VoiceIsolationSettings(defaults: defaults)
+
+        let offSession = FakeAudioSession()
+        try SystemAudioManager(session: offSession, voiceIsolation: settings)
+            .configureAudioSession(recordingFrom: .automatic)
+        XCTAssertEqual(offSession.mode, .measurement, "off keeps today's mode")
+        XCTAssertEqual(
+            offSession.calls.first,
+            .category(.playAndRecord, .measurement, [.mixWithOthers, .allowBluetoothA2DP, .defaultToSpeaker])
+        )
+
+        settings.isEnabled = true
+        let onSession = FakeAudioSession()
+        let audio = SystemAudioManager(session: onSession, voiceIsolation: settings)
+        try audio.configureAudioSession(recordingFrom: .automatic)
+        XCTAssertEqual(onSession.mode, .voiceChat)
+        guard case .category(.playAndRecord, .voiceChat, let options)? = onSession.calls.first else {
+            return XCTFail("the category and mode are set together")
+        }
+        XCTAssertTrue(options.contains(.mixWithOthers), "the experiment keeps today's options")
+        XCTAssertFalse(options.contains(.duckOthers))
+        XCTAssertTrue(
+            onSession.categoryOptions.contains(.allowBluetoothHFP),
+            "iOS adds hands-free Bluetooth itself in .voiceChat"
+        )
+
+        try audio.configureAudioSession(recordingFrom: nil)
+        XCTAssertEqual(
+            onSession.calls.filter { if case .category = $0 { true } else { false } }.count,
+            1,
+            "the implicit option doesn't set the category again while the mode stays the same"
+        )
     }
 
     func testRecordingMixesWithOtherAppsAudioWhateverTheMicrophone() throws {
@@ -3648,6 +3764,32 @@ final class AudioSessionSetupTests: XCTestCase {
             .active(true, []),
             .active(false, .notifyOthersOnDeactivation),
         ])
+    }
+}
+
+final class VoiceIsolationSettingsTests: XCTestCase {
+    /// Off by default, and turned on in the shared App Group so the keyboard reads it too.
+    func testVoiceIsolationIsOffByDefaultAndPersists() throws {
+        let suite = "hex.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        XCTAssertFalse(VoiceIsolationSettings(defaults: defaults).isEnabled)
+        XCTAssertNil(defaults.object(forKey: "experiments.voiceIsolation"), "reading writes nothing")
+
+        VoiceIsolationSettings(defaults: defaults).isEnabled = true
+        XCTAssertEqual(defaults.object(forKey: "experiments.voiceIsolation") as? Bool, true)
+        XCTAssertTrue(VoiceIsolationSettings(defaults: defaults).isEnabled)
+    }
+
+    func testTheLaunchArgumentTurnsVoiceIsolationOn() throws {
+        let suite = "hex.tests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let settings = VoiceIsolationSettings(defaults: defaults)
+        settings.applyLaunchArguments([VoiceIsolationSettings.launchArgument])
+        XCTAssertTrue(settings.isEnabled)
     }
 }
 

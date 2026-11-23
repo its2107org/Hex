@@ -61,6 +61,9 @@ extension FullKeyboardView {
         }
         keyFeedback()
         clipboard.markPasted()
+        if !pointsToSetting && readDuration < KeyboardClipboardTracker.askedReadDuration {
+            clipboard.recordSilentPaste(pasteboard: pasteboard)
+        }
         typingLog?.edit("paste", [TypingLogField("inserted", .string(text))])
         engine.commitHangulComposition()
         engine.forgetTextAroundKeys()
@@ -72,9 +75,14 @@ extension FullKeyboardView {
         onTextEdit?()
     }
 
-    /// For a few seconds after a paste iOS asked about (or refused), the strip says where
-    /// to stop it asking: Settings › Apps › Hex › Paste from Other Apps › Allow.
-    private func showAllowPasteHint() {
+    /// Two-line notice with a Settings chip after iOS asks Allow Paste or refuses a read.
+    var allowPasteNotice: KeyboardStripNotice? {
+        showsAllowPasteHint ? KeyboardClipboardTracker.allowPasteNotice : nil
+    }
+
+    /// For a few seconds after a paste iOS asked about (or refused), the strip offers a
+    /// Settings chip pointing straight to Paste from Other Apps › Allow.
+    func showAllowPasteHint() {
         showsAllowPasteHint = true
         refreshStrip()
         UIAccessibility.post(notification: .announcement, argument: KeyboardClipboardTracker.allowPasteHintAnnouncement)
@@ -84,12 +92,69 @@ extension FullKeyboardView {
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.allowPasteHintDuration, execute: work)
     }
 
+    /// Opens Hex to jump straight to iOS Settings › Apps › Hex.
+    func openPasteSettingsFromHint() {
+        hideAllowPasteHint()
+        model.onOpenURL?(KeyboardLaunchRequest.pasteSettings.url)
+    }
+
     /// Typing takes the strip back before the hint's time is up.
     func hideAllowPasteHint() {
         allowPasteHintHideWork?.cancel()
         allowPasteHintHideWork = nil
         guard showsAllowPasteHint else { return }
         showsAllowPasteHint = false
+        refreshStrip()
+    }
+
+    // MARK: New speech model
+
+    /// Two-line notice with an Open Hex chip while the model the keyboard would dictate with
+    /// isn't downloaded (`KeyboardParakeetNotice`).
+    var modelNotice: KeyboardStripNotice? {
+        guard showsModelNotice, !isDictating else { return nil }
+        return KeyboardStripNotice(
+            title: String(localized: "New speech model"),
+            detail: String(localized: "Downloads in Hex on Wi-Fi"),
+            button: String(localized: "Open Hex"),
+            dismissible: true
+        )
+    }
+
+    /// When the keyboard appears: only with Full Access (the App Group, where the model and the
+    /// counts are, and opening Hex need it), never in a password or one-time-code field, never
+    /// while dictating, and as often as `KeyboardParakeetNotice` allows.
+    func offerModelNotice(now: Date = Date(), awaitsDownload: Bool = KeyboardParakeetNotice.modelAwaitsDownload()) {
+        let notice = KeyboardParakeetNotice()
+        guard !showsModelNotice, model.hasFullAccess, !isDictating,
+              engine.target.isSecureTextEntry != true, engine.target.textContentType != .oneTimeCode,
+              awaitsDownload, notice.mayShow(now: now) else { return }
+        notice.recordShown(now: now)
+        showsModelNotice = true
+        typingLog?.ui("model_notice")
+        refreshStrip()
+    }
+
+    private var isDictating: Bool {
+        model.stagePhase == .starting || model.stagePhase == .recording || model.stagePhase == .transcribing
+    }
+
+    func openHexForModel() {
+        KeyboardParakeetNotice().recordOpened()
+        hideModelNotice()
+        model.onOpenURL?(KeyboardParakeetNotice.opensHex)
+    }
+
+    /// The notice's ✕: gone at once and never shown again on this iPhone.
+    func dismissModelNotice() {
+        KeyboardParakeetNotice().recordDismissed()
+        hideModelNotice()
+    }
+
+    /// Typing or dictating takes the strip back.
+    func hideModelNotice() {
+        guard showsModelNotice else { return }
+        showsModelNotice = false
         refreshStrip()
     }
 }

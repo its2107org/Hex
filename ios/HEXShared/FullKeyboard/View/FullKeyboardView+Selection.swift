@@ -17,6 +17,7 @@ extension FullKeyboardView {
         engine.performTrackpadSelectionAction(action) { [weak self] text in
             guard let self, self.model.hasFullAccess else { return }
             UIPasteboard.general.string = text
+            self.clipboard.markOwnedCopy()
         }
         refreshStrip()
     }
@@ -26,7 +27,7 @@ extension FullKeyboardView {
     /// session or in-keyboard dictation), opening Hex would leave the keyboard, so it opens
     /// Hex as the Hex key does (or says Full Access is missing) and the text stays.
     func startSelectionDictation() {
-        guard model.hasFullAccess, model.dictatesThroughHex || model.onLocalDictateTap != nil else {
+        guard model.route.dictatesInPlace else {
             engine.performTrackpadSelectionAction(.cancel) { _ in }
             refreshStrip()
             hexKeyHeld(from: "selection_dictate")
@@ -51,7 +52,7 @@ extension FullKeyboardView {
         lastStagePhase = phase
         guard engine.hasPendingSelectionDictation else { return }
         switch phase {
-        case .recording, .transcribing:
+        case .starting, .recording, .transcribing:
             selectionDictationStarted = true
             selectionDictationClear?.cancel()
             selectionDictationClear = nil
@@ -76,7 +77,7 @@ extension FullKeyboardView {
         let work = DispatchWorkItem { [weak self] in
             guard let self, !self.selectionDictationStarted else { return }
             let phase = self.model.stagePhase
-            guard phase != .recording, phase != .transcribing else { return }
+            guard phase != .starting, phase != .recording, phase != .transcribing else { return }
             self.engine.clearPendingSelectionDictation()
             self.refreshStrip()
         }
